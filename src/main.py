@@ -1,23 +1,40 @@
-import re
+import csv
+import io
 import unicodedata
-import requests
+import zipfile
 
-from bs4 import BeautifulSoup
+import requests
 
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
-# RÚIAN / VDP:
-# Kód Pardubického kraje (VÚSC) = 94
-RUIAN_URL = "https://vdp.cuzk.gov.cz/vdp/ruian/obce"
+# Oficiální číselník obcí RÚIAN od ČÚZK
+RUIAN_URL = "https://services.cuzk.cz/sestavy/cis/UI_OBEC.zip"
 
 UREDNI_DESKY_OFN = (
     "https://ofn.gov.cz/úřední-desky/2021-07-20/"
 )
 
+# Okresy Pardubického kraje:
+#
+# Chrudim          3601
+# Pardubice        3602
+# Svitavy          3603
+# Ústí nad Orlicí  3604
+#
+# Používáme kódy okresů místo názvů,
+# takže nehrozí problém s diakritikou.
+PARDUBICKY_OKRESY = {
+    "3601",
+    "3602",
+    "3603",
+    "3604",
+}
+
 
 def bez_diakritiky(text):
     """Odstraní diakritiku a převede text na malá písmena."""
+
     text = text or ""
 
     text = unicodedata.normalize(
@@ -35,145 +52,155 @@ def bez_diakritiky(text):
 
 
 def nacti_obce():
-    """Stáhne seznam obcí Pardubického kraje z RÚIAN."""
+    """Stáhne všechny obce z RÚIAN a vybere Pardubický kraj."""
 
-    print("Stahuji obce Pardubického kraje z RÚIAN...")
+    print("Stahuji seznam obcí z RÚIAN...")
+    print(f"Zdroj: {RUIAN_URL}")
     print()
 
-    vsechny_obce = []
-
-    # Nejprve zjistíme první stránku.
     response = requests.get(
         RUIAN_URL,
-        params={
-            "kodVusc": "94"
-        },
         timeout=60
     )
 
     response.raise_for_status()
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    # RÚIAN standardně zobrazuje 20 obcí na stránku.
-    # Z textu stránky zjistíme celkový počet.
-    text = soup.get_text(" ", strip=True)
-
-    match = re.search(
-        r"\d+-\d+\s+z\s+(\d+)",
-        text
-    )
-
-    if match:
-        celkem = int(match.group(1))
-    else:
-        celkem = None
-
-    # Zpracování první stránky.
-    vsechny_obce.extend(
-        extrahuj_obce(soup)
-    )
-
     print(
-        f"První stránka: "
-        f"{len(vsechny_obce)} obcí"
+        f"Staženo: "
+        f"{len(response.content):,} bytů"
     )
 
-    # Pokud známe celkový počet, stáhneme další stránky.
-    if celkem:
-        pocet_stranek = (celkem + 19) // 20
+    # ZIP otevřeme přímo z paměti.
+    with zipfile.ZipFile(
+        io.BytesIO(response.content)
+    ) as archive:
 
-        for page in range(2, pocet_stranek + 1):
+        soubory = archive.namelist()
 
-            response = requests.get(
-                RUIAN_URL,
-                params={
-                    "kodVusc": "94",
-                    "page": str(page)
-                },
-                timeout=60
+        print("Obsah ZIP souboru:")
+        for soubor in soubory:
+            print(f"  {soubor}")
+
+        print()
+
+        # Najdeme CSV soubor.
+        csv_soubory = [
+            soubor
+            for soubor in soubory
+            if soubor.lower().endswith(".csv")
+        ]
+
+        if not csv_soubory:
+            raise RuntimeError(
+                "V UI_OBEC.zip nebyl nalezen CSV soubor."
             )
 
-            response.raise_for_status()
+        csv_soubor = csv_soubory[0]
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
-            )
+        print(
+            f"Používám soubor: {csv_soubor}"
+        )
+        print()
 
-            nove_obce = extrahuj_obce(soup)
+        raw_data = archive.read(
+            csv_soubor
+        )
 
-            vsechny_obce.extend(
-                nove_obce
+    # ČÚZK může změnit kódování.
+    # Zkusíme UTF-8 a potom Windows-1250.
+    text = None
+
+    for encoding in [
+        "utf-8-sig",
+        "cp1250",
+        "latin-1"
+    ]:
+
+        try:
+            text = raw_data.decode(
+                encoding
             )
 
             print(
-                f"Stránka {page}/{pocet_stranek}: "
-                f"+{len(nove_obce)} obcí"
+                f"CSV načteno jako {encoding}."
             )
 
-    # Odstranění případných duplicit.
-    unikaty = {}
+            break
 
-    for obec in vsechny_obce:
-        unikaty[obec["kod"]] = obec
+        except UnicodeDecodeError:
+            continue
 
-    obce = list(
-        unikaty.values()
+    if text is None:
+        raise RuntimeError(
+            "Nepodařilo se dekódovat CSV."
+        )
+
+    # CSV ČÚZK používá středník.
+    reader = csv.DictReader(
+        io.StringIO(text),
+        delimiter=";"
     )
-
-    print()
-    print(
-        f"Celkem načteno obcí: {len(obce)}"
-    )
-
-    return obce
-
-
-def extrahuj_obce(soup):
-    """Extrahuje obce z tabulky RÚIAN."""
 
     obce = []
 
-    for row in soup.select("table tbody tr"):
+    for row in reader:
 
-        cells = row.find_all("td")
+        kod = (
+            row.get("KOD")
+            or ""
+        ).strip()
 
-        if len(cells) < 2:
+        nazev = (
+            row.get("NAZEV")
+            or ""
+        ).strip()
+
+        okres = (
+            row.get("OKRES_KOD")
+            or ""
+        ).strip()
+
+        plati_do = (
+            row.get("PLATI_DO")
+            or ""
+        ).strip()
+
+        if not kod or not nazev:
             continue
 
-        kod = cells[0].get_text(
-            " ",
-            strip=True
-        )
-
-        nazev = cells[1].get_text(
-            " ",
-            strip=True
-        )
-
-        # Kód obce je číselný.
-        if not kod.isdigit():
+        # Pouze aktuálně platné obce.
+        if plati_do:
             continue
 
-        if not nazev:
+        # Pouze okresy Pardubického kraje.
+        if okres not in PARDUBICKY_OKRESY:
             continue
 
         obce.append(
             {
                 "kod": kod,
-                "nazev": nazev
+                "nazev": nazev,
+                "okres": okres
             }
         )
+
+    obce.sort(
+        key=lambda obec: bez_diakritiky(
+            obec["nazev"]
+        )
+    )
+
+    print()
+    print(
+        f"Obcí v Pardubickém kraji: "
+        f"{len(obce)}"
+    )
 
     return obce
 
 
 def nacti_uredni_desky():
-    """Stáhne seznam úředních desek z NKOD."""
+    """Stáhne úřední desky z NKOD."""
 
     print()
     print(
@@ -235,14 +262,25 @@ def nacti_uredni_desky():
     data = datasets["data"]
 
     print(
-        f"NKOD obsahuje {total} úředních desek."
+        f"NKOD obsahuje "
+        f"{total} úředních desek."
+    )
+
+    print(
+        f"Staženo záznamů: "
+        f"{len(data)}"
     )
 
     return data
 
 
 def najdi_shodu(obec, desky):
-    """Najde úřední desky, které pravděpodobně patří obci."""
+    """
+    Pokusí se najít úřední desky dané obce.
+
+    Hledáme název obce v názvu poskytovatele
+    nebo názvu datové sady.
+    """
 
     hledany_nazev = bez_diakritiky(
         obec["nazev"]
@@ -273,17 +311,29 @@ def najdi_shodu(obec, desky):
             publisher
         )
 
-        # Hledáme název obce v názvu
-        # nebo poskytovateli.
-        if (
-            hledany_nazev in title_norm
-            or hledany_nazev in publisher_norm
-        ):
+        # Preferujeme shodu v názvu poskytovatele.
+        if hledany_nazev in publisher_norm:
+
             vysledky.append(
                 {
                     "title": title,
                     "publisher": publisher,
-                    "iri": deska["iri"]
+                    "iri": deska["iri"],
+                    "typ_shody": "poskytovatel"
+                }
+            )
+
+            continue
+
+        # Druhá možnost je název samotné datové sady.
+        if hledany_nazev in title_norm:
+
+            vysledky.append(
+                {
+                    "title": title,
+                    "publisher": publisher,
+                    "iri": deska["iri"],
+                    "typ_shody": "název datové sady"
                 }
             )
 
@@ -306,18 +356,34 @@ def main():
     )
     print()
 
-    # 1. Obce
+    # ------------------------------------
+    # 1. Obce Pardubického kraje
+    # ------------------------------------
+
     obce = nacti_obce()
 
-    # 2. Úřední desky
+    if not obce:
+        raise RuntimeError(
+            "Nenalezena žádná obec. "
+            "Zkontroluj strukturu RÚIAN CSV."
+        )
+
+    # ------------------------------------
+    # 2. Úřední desky z NKOD
+    # ------------------------------------
+
     desky = nacti_uredni_desky()
+
+    # ------------------------------------
+    # 3. Porovnání
+    # ------------------------------------
 
     print()
     print(
         "======================================"
     )
     print(
-        "  POROVNÁNÍ OBCÍ A ÚŘEDNÍCH DESEK"
+        "  POROVNÁNÍ"
     )
     print(
         "======================================"
@@ -326,6 +392,8 @@ def main():
 
     nalezene = 0
     nenalezene = 0
+
+    vysledky = []
 
     for obec in obce:
 
@@ -338,35 +406,107 @@ def main():
 
             nalezene += 1
 
-            print(
-                f"✓ {obec['nazev']}"
+            vysledky.append(
+                {
+                    "obec": obec,
+                    "shody": shody
+                }
             )
-
-            for shoda in shody:
-
-                print(
-                    f"    Úřední deska: "
-                    f"{shoda['title']}"
-                )
-
-                print(
-                    f"    Poskytovatel: "
-                    f"{shoda['publisher']}"
-                )
-
-                print(
-                    f"    IRI: "
-                    f"{shoda['iri']}"
-                )
 
         else:
 
             nenalezene += 1
 
-            print(
-                f"✗ {obec['nazev']} "
-                f"(nenalezena v NKOD)"
+            vysledky.append(
+                {
+                    "obec": obec,
+                    "shody": []
+                }
             )
+
+    # ------------------------------------
+    # 4. Výpis nalezených
+    # ------------------------------------
+
+    print(
+        "OBCE S NALEZENOU ÚŘEDNÍ DESKOU"
+    )
+    print(
+        "--------------------------------------"
+    )
+    print()
+
+    for vysledek in vysledky:
+
+        if not vysledek["shody"]:
+            continue
+
+        obec = vysledek["obec"]
+
+        print(
+            f"✓ {obec['nazev']}"
+        )
+
+        print(
+            f"  Kód obce: {obec['kod']}"
+        )
+
+        print(
+            f"  Okres: {obec['okres']}"
+        )
+
+        for shoda in vysledek["shody"]:
+
+            print(
+                f"  Úřední deska: "
+                f"{shoda['title']}"
+            )
+
+            print(
+                f"  Poskytovatel: "
+                f"{shoda['publisher']}"
+            )
+
+            print(
+                f"  Typ shody: "
+                f"{shoda['typ_shody']}"
+            )
+
+            print(
+                f"  IRI: "
+                f"{shoda['iri']}"
+            )
+
+        print()
+
+    # ------------------------------------
+    # 5. Výpis nenalezených
+    # ------------------------------------
+
+    print()
+    print(
+        "OBCE BEZ NALEZENÉ ÚŘEDNÍ DESKY"
+    )
+    print(
+        "--------------------------------------"
+    )
+    print()
+
+    for vysledek in vysledky:
+
+        if vysledek["shody"]:
+            continue
+
+        obec = vysledek["obec"]
+
+        print(
+            f"✗ {obec['nazev']} "
+            f"(kód {obec['kod']})"
+        )
+
+    # ------------------------------------
+    # 6. Souhrn
+    # ------------------------------------
 
     print()
     print(
@@ -394,15 +534,14 @@ def main():
         f"{nenalezene}"
     )
 
-    if obce:
-        pokryti = (
-            nalezene / len(obce) * 100
-        )
+    pokryti = (
+        nalezene / len(obce) * 100
+    )
 
-        print(
-            f"Pokrytí přes NKOD: "
-            f"{pokryti:.1f} %"
-        )
+    print(
+        f"Pokrytí přes NKOD: "
+        f"{pokryti:.1f} %"
+    )
 
 
 if __name__ == "__main__":
