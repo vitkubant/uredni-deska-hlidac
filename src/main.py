@@ -1,29 +1,72 @@
 import requests
 
-NKOD_API = "https://data.gov.cz/api/v1/catalogs"
+NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
 
 def main():
     print("======================================")
     print("  ÚŘEDNÍ DESKA HLÍDAČ")
-    print("  První test")
+    print("  První připojení k NKOD")
     print("======================================")
     print()
 
-    print("Připojuji se k NKOD...")
+    query = """
+    {
+      datasets(limit: 5) {
+        data {
+          iri
+          title {
+            cs
+          }
+        }
+        pagination {
+          totalCount
+        }
+      }
+    }
+    """
+
+    print("Připojuji se k NKOD přes GraphQL...")
 
     try:
-        response = requests.get(NKOD_API, timeout=30)
+        response = requests.post(
+            NKOD_GRAPHQL,
+            json={"query": query},
+            timeout=30
+        )
+
         response.raise_for_status()
 
+        result = response.json()
+
+        if "errors" in result:
+            print("NKOD vrátil chybu:")
+            print(result["errors"])
+            return
+
+        datasets = result["data"]["datasets"]
+
         print("Připojení funguje.")
-        print(f"HTTP status: {response.status_code}")
         print()
 
-        data = response.json()
+        print(f"Celkový počet datových sad v NKOD: "
+              f"{datasets['pagination']['totalCount']}")
+        print()
 
-        print("Odpověď z NKOD byla úspěšně načtena.")
-        print(f"Počet nalezených katalogů: {len(data)}")
+        print("Prvních 5 datových sad:")
+        print("--------------------------------------")
+
+        for dataset in datasets["data"]:
+            title = dataset["title"]
+
+            if title and title.get("cs"):
+                name = title["cs"]
+            else:
+                name = "(bez českého názvu)"
+
+            print(name)
+            print(dataset["iri"])
+            print()
 
     except Exception as e:
         print("Nastala chyba:")
