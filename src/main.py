@@ -237,8 +237,13 @@ def nacti_uredni_desky(session):
 
 def najdi_kandidaty(obce, desky):
     """
-    Priradi uredni desku ke konkretni obci.
-    Nepouziva obecny substring, aby se nepletly podobne nazvy.
+    Bezpečně přiřadí úřední desku ke konkrétní obci.
+
+    Zachovává přesné párování, ale zvládá více běžných
+    variant názvů publishera a datasetu.
+
+    Nepoužívá obecný substring, aby nedocházelo k chybnému
+    přiřazení podobně pojmenovaných obcí.
     """
 
     kandidati = []
@@ -246,16 +251,54 @@ def najdi_kandidaty(obce, desky):
     def cisti_text(text):
         text = bez_diakritiky(text)
         text = text.replace("–", "-").replace("—", "-")
-        return " ".join(text.split()).strip()
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
 
-    def odpovida_obci(text, obec):
-        text = cisti_text(text)
+    def priprav_varianty(obec):
         nazev = cisti_text(obec["nazev"])
 
+        return {
+            nazev,
+            f"obec {nazev}",
+            f"mesto {nazev}",
+            f"mestys {nazev}",
+            f"statutarni mesto {nazev}",
+            f"obecni urad {nazev}",
+            f"mestsky urad {nazev}",
+            f"urad mesta {nazev}",
+            f"urad obce {nazev}",
+            f"magistrat mesta {nazev}",
+            f"magistrat {nazev}",
+            f"uredni deska {nazev}",
+            f"uredni deska mesta {nazev}",
+            f"uredni deska obce {nazev}",
+            f"uredni deska mestyse {nazev}",
+            f"uredni deska uradu {nazev}",
+        }
+
+    def obsahuje_celou_frazi(text, fraze):
+        """
+        Ověří, že název obce je v textu jako celá fráze,
+        nikoliv pouze jako část jiného slova.
+        """
+        text = cisti_text(text)
+        fraze = cisti_text(fraze)
+
+        if not text or not fraze:
+            return False
+
+        if text == fraze:
+            return True
+
+        vzor = r"(?<![a-z0-9])" + re.escape(fraze) + r"(?![a-z0-9])"
+        return re.search(vzor, text) is not None
+
+    def je_zakazany_subjekt(text):
+        text = cisti_text(text)
+
         zakazane = (
-            "kraj ",
             "krajsky urad",
-            "krajsky ",
+            "kraj ",
             "ministerstvo",
             "okresni soud",
             "krajsky soud",
@@ -268,50 +311,67 @@ def najdi_kandidaty(obce, desky):
             "nemocnice",
         )
 
-        if any(text.startswith(zakaz) for zakaz in zakazane):
+        return any(text.startswith(zakaz) for zakaz in zakazane)
+
+    def odpovida_obci(text, obec):
+        text = cisti_text(text)
+
+        if not text:
             return False
 
-        mozne_tvary = (
-            f"obec {nazev}",
-            f"mesto {nazev}",
-            f"mestys {nazev}",
-            f"statutarni mesto {nazev}",
-            f"obecni urad {nazev}",
-            f"mestsky urad {nazev}",
-            f"urad mesta {nazev}",
-            f"magistrat mesta {nazev}",
-            f"uredni deska {nazev}",
-            nazev,
-        )
+        if je_zakazany_subjekt(text):
+            return False
 
-        if text in mozne_tvary:
+        nazev = cisti_text(obec["nazev"])
+        varianty = priprav_varianty(obec)
+
+        # 1. Nejbezpečnější varianta:
+        # přesná shoda celého názvu.
+        if text in varianty:
             return True
 
-        odstranovaci_prefixy = (
+        # 2. Odstranění běžných prefixů.
+        prefixy = (
             "uredni deska - ",
+            "uredni deska ",
+            "elektronicka uredni deska - ",
+            "elektronicka uredni deska ",
             "uredni deska mesta ",
             "uredni deska obce ",
             "uredni deska mestyse ",
             "uredni deska uradu ",
-            "uredni deska ",
-        )
-
-        for prefix in odstranovaci_prefixy:
-            if text.startswith(prefix):
-                zbytek = text[len(prefix):].strip()
-                if zbytek == nazev:
-                    return True
-
-        for prefix in (
-            "obec ",
             "mesto ",
+            "obec ",
             "mestys ",
             "statutarni mesto ",
-        ):
+            "mestsky urad ",
+            "obecni urad ",
+            "urad mesta ",
+            "urad obce ",
+            "magistrat mesta ",
+            "magistrat ",
+        )
+
+        for prefix in prefixy:
             if text.startswith(prefix):
                 zbytek = text[len(prefix):].strip()
+
                 if zbytek == nazev:
                     return True
+
+        # 3. Bezpečná shoda celého názvu obce uvnitř názvu
+        # publishera/datasetu.
+        #
+        # Např.:
+        # "Město Holice - úřední deska"
+        # "Elektronická úřední deska města Holice"
+        #
+        # Ale nepoužíváme obyčejné:
+        #     if nazev in text
+        #
+        # protože by mohlo dojít k chybnému přiřazení.
+        if obsahuje_celou_frazi(text, nazev):
+            return True
 
         return False
 
@@ -330,11 +390,13 @@ def najdi_kandidaty(obce, desky):
 
         nalezena_obec = None
 
+        # Publisher má přednost.
         for obec in obce:
             if odpovida_obci(publisher, obec):
                 nalezena_obec = obec
                 break
 
+        # Pokud publisher nestačí, zkusíme název datasetu.
         if nalezena_obec is None:
             for obec in obce:
                 if odpovida_obci(title, obec):
