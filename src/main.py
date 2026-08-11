@@ -2,21 +2,38 @@ import requests
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
+# Oficiální standard pro úřední desky
+UREDNI_DESKY_OFN = "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+
 
 def main():
     print("======================================")
     print("  ÚŘEDNÍ DESKA HLÍDAČ")
-    print("  První připojení k NKOD")
+    print("  Vyhledávání úředních desek")
     print("======================================")
     print()
 
     query = """
-    {
-      datasets(limit: 5) {
+    query {
+      datasets(
+        limit: 100
+        filters: {
+          conformsTo: "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+        }
+      ) {
         data {
           iri
           title {
             cs
+          }
+          publisher {
+            title {
+              cs
+            }
+          }
+          distribution {
+            accessURL
+            format
           }
         }
         pagination {
@@ -26,13 +43,14 @@ def main():
     }
     """
 
-    print("Připojuji se k NKOD přes GraphQL...")
+    print("Hledám datové sady úředních desek v NKOD...")
+    print()
 
     try:
         response = requests.post(
             NKOD_GRAPHQL,
             json={"query": query},
-            timeout=30
+            timeout=60
         )
 
         response.raise_for_status()
@@ -46,26 +64,35 @@ def main():
 
         datasets = result["data"]["datasets"]
 
-        print("Připojení funguje.")
+        total = datasets["pagination"]["totalCount"]
+        data = datasets["data"]
+
+        print(f"Celkem nalezených úředních desek: {total}")
         print()
 
-        print(f"Celkový počet datových sad v NKOD: "
-              f"{datasets['pagination']['totalCount']}")
+        print("======================================")
+        print("SEZNAM ÚŘEDNÍCH DESEK")
+        print("======================================")
         print()
 
-        print("Prvních 5 datových sad:")
-        print("--------------------------------------")
+        for number, dataset in enumerate(data, start=1):
+            title = dataset.get("title") or {}
+            publisher = dataset.get("publisher") or {}
+            
+            title_cs = title.get("cs") or "(bez názvu)"
+            publisher_title = publisher.get("title") or {}
+            publisher_cs = publisher_title.get("cs") or "(neznámý poskytovatel)"
 
-        for dataset in datasets["data"]:
-            title = dataset["title"]
+            print(f"{number}. {title_cs}")
+            print(f"   Poskytovatel: {publisher_cs}")
+            print(f"   IRI: {dataset['iri']}")
 
-            if title and title.get("cs"):
-                name = title["cs"]
-            else:
-                name = "(bez českého názvu)"
+            distributions = dataset.get("distribution") or []
 
-            print(name)
-            print(dataset["iri"])
+            for distribution in distributions:
+                if distribution.get("accessURL"):
+                    print(f"   Data: {distribution['accessURL']}")
+
             print()
 
     except Exception as e:
