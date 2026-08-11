@@ -5,6 +5,7 @@ import re
 import unicodedata
 import zipfile
 import time
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -23,6 +24,9 @@ PARDUBICKY_OKRESY = {
     "3609",  # Svitavy
     "3611",  # Ústí nad Orlicí
 }
+
+# Kolik dní zpět chceme sledovat nové nabídky.
+MAX_STARI_DNI = 30
 
 
 def bez_diakritiky(text):
@@ -514,6 +518,41 @@ def ziskej_informace(data):
 
     return informace
 
+def je_aktualni_datum(datum):
+    """
+    Vrátí True, pokud je datum vyvěšení
+    v posledních MAX_STARI_DNI dnech.
+
+    Očekáváme datum ve formátu:
+        2026-08-10
+    """
+
+    if not datum or datum == "?":
+        return False
+
+    try:
+        # JSON-LD může obsahovat i čas:
+        # 2026-08-10T12:34:56
+        datum_text = str(datum).strip()
+
+        datum_text = datum_text[:10]
+
+        datum_obj = datetime.strptime(
+            datum_text,
+            "%Y-%m-%d"
+        ).date()
+
+    except (ValueError, TypeError):
+        return False
+
+    dnes = date.today()
+
+    hranice = (
+        dnes
+        - timedelta(days=MAX_STARI_DNI)
+    )
+
+    return hranice <= datum_obj <= dnes
 
 def text_informace(item):
 
@@ -542,20 +581,39 @@ def text_informace(item):
 
 
 def je_podezrely_prodej(item):
+    """
+    Rozpozná nabídky týkající se pozemků
+    a současně vyřadí zjevně nerelevantní dokumenty.
+    """
 
     text = text_informace(item)
+
+    # ----------------------------------------
+    # POZEMEK / PARCELA
+    # ----------------------------------------
 
     pozemek = any(
         x in text
         for x in (
             "pozemek",
             "pozemku",
+            "pozemky",
+            "pozemcich",
             "parcela",
+            "parcely",
             "parcelni",
+            "parcelní",
             "parc. c",
             "p. c.",
         )
     )
+
+    if not pozemek:
+        return False
+
+    # ----------------------------------------
+    # PRODEJ
+    # ----------------------------------------
 
     prodej = any(
         x in text
@@ -564,33 +622,70 @@ def je_podezrely_prodej(item):
             "prodeje",
             "prodeji",
             "prodat",
+            "prodej pozemku",
+            "prodeji pozemku",
+            "zamer prodeje",
+            "zamer prodat",
         )
     )
+
+    # ----------------------------------------
+    # ZÁMĚR
+    # ----------------------------------------
 
     zamer = (
         "zamer" in text
+        or "záměr" in text
     )
 
-    nemovitost = any(
-        x in text
-        for x in (
-            "nemovitost",
-            "nemovitosti",
-        )
+    # ----------------------------------------
+    # VÝBĚROVÉ ŘÍZENÍ
+    # ----------------------------------------
+
+    vyberove_rizeni = (
+        "vyberove rizeni" in text
+        or "vyberoveho rizeni" in text
+        or "vyberove" in text
     )
 
-    # Nejdůležitější kombinace:
+    # ----------------------------------------
+    # DAROVÁNÍ / VÝPŮJČKA / NÁJEM
+    #
+    # Tyto věci zatím nechceme.
+    # ----------------------------------------
+
+    nechtene = (
+        "darovani",
+        "darovat",
+        "vypujcka",
+        "vypujcit",
+        "pronajem",
+        "pronajmu",
+        "najmu",
+        "pacht",
+        "vyprosa",
+    )
+
+    if any(
+        slovo in text
+        for slovo in nechtene
+    ):
+        return False
+
+    # ----------------------------------------
+    # HLAVNÍ PODMÍNKY
+    # ----------------------------------------
+
     if pozemek and prodej:
         return True
 
-    # Druhá užitečná kombinace:
-    if zamer and (
-        pozemek or nemovitost
-    ):
+    if pozemek and zamer:
+        return True
+
+    if pozemek and vyberove_rizeni:
         return True
 
     return False
-
 
 def hlavni():
 
@@ -740,10 +835,39 @@ def hlavni():
 
         for item in informace:
 
+            # --------------------------------
+            # Datum vyvěšení
+            # --------------------------------
+
+            datum = (
+                (
+                    item.get("vyvěšení")
+                    or {}
+                ).get("datum")
+                or "?"
+            )
+
+            # --------------------------------
+            # Pouze aktuální dokumenty
+            # --------------------------------
+
+            if not je_aktualni_datum(
+                datum
+            ):
+                continue
+
+            # --------------------------------
+            # Pouze nabídky pozemků
+            # --------------------------------
+
             if not je_podezrely_prodej(
                 item
             ):
                 continue
+
+            # --------------------------------
+            # Název
+            # --------------------------------
 
             nazev = (
                 (
@@ -753,13 +877,9 @@ def hlavni():
                 or "Bez názvu"
             )
 
-            datum = (
-                (
-                    item.get("vyvěšení")
-                    or {}
-                ).get("datum")
-                or "?"
-            )
+            # --------------------------------
+            # URL
+            # --------------------------------
 
             url = (
                 item.get("url")
@@ -785,6 +905,40 @@ def hlavni():
             )
 
         time.sleep(0.1)
+    # ------------------------------------
+    # 4b. Odstranění duplicit
+    # ------------------------------------
+
+    unikatni = []
+    videne = set()
+
+    for item in nalezene:
+
+        klic = (
+            item["url"]
+            or (
+                item["obce"][0]
+                + "|"
+                + item["nazev"]
+                + "|"
+                + item["datum"]
+            )
+        )
+
+        if klic in videne:
+            continue
+
+        videne.add(klic)
+        unikatni.append(item)
+
+    nalezene = unikatni
+
+    print()
+    print(
+        f"Aktuálních nabídek pozemků: "
+        f"{len(nalezene)}"
+    )
+
 
     # ------------------------------------
     # 5. Výsledky
