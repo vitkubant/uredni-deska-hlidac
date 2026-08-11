@@ -267,11 +267,9 @@ def najdi_kandidaty(obce, desky):
     """
     Bezpečně přiřadí úřední desku ke konkrétní obci.
 
-    Zachovává přesné párování, ale zvládá více běžných
-    variant názvů publishera a datasetu.
-
-    Nepoužívá obecný substring, aby nedocházelo k chybnému
-    přiřazení podobně pojmenovaných obcí.
+    Nejprve se pokusí o přesné párování podle IČO publishera.
+    Pokud IČO není k dispozici nebo se podle něj nepodaří
+    obec najít, použije dosavadní bezpečné párování podle názvu.
     """
 
     kandidati = []
@@ -305,10 +303,6 @@ def najdi_kandidaty(obce, desky):
         }
 
     def obsahuje_celou_frazi(text, fraze):
-        """
-        Ověří, že název obce je v textu jako celá fráze,
-        nikoliv pouze jako část jiného slova.
-        """
         text = cisti_text(text)
         fraze = cisti_text(fraze)
 
@@ -318,7 +312,12 @@ def najdi_kandidaty(obce, desky):
         if text == fraze:
             return True
 
-        vzor = r"(?<![a-z0-9])" + re.escape(fraze) + r"(?![a-z0-9])"
+        vzor = (
+            r"(?<![a-z0-9])"
+            + re.escape(fraze)
+            + r"(?![a-z0-9])"
+        )
+
         return re.search(vzor, text) is not None
 
     def je_zakazany_subjekt(text):
@@ -353,12 +352,11 @@ def najdi_kandidaty(obce, desky):
         nazev = cisti_text(obec["nazev"])
         varianty = priprav_varianty(obec)
 
-        # 1. Nejbezpečnější varianta:
-        # přesná shoda celého názvu.
+        # 1. Přesná shoda celého názvu.
         if text in varianty:
             return True
 
-        # 2. Odstranění běžných prefixů.
+        # 2. Běžné prefixy.
         prefixy = (
             "uredni deska - ",
             "uredni deska ",
@@ -387,47 +385,71 @@ def najdi_kandidaty(obce, desky):
                 if zbytek == nazev:
                     return True
 
-        # 3. Shoda názvu obce uvnitř publishera/datasetu.
-        #
-        # U jednoslovných názvů NEPOVOLUJEME pouhé nalezení slova
-        # uvnitř delšího názvu.
-        #
-        # Např.:
-        #   obec "Veselí"
-        #   publisher "Veselí nad Moravou"
-        #
-        # není shoda.
-        #
-        # U víceslovných názvů je shoda celého názvu bezpečnější.
+        # 3. U víceslovných názvů povolíme bezpečnou
+        # shodu celé fráze.
         pocet_slov = len(nazev.split())
 
         if pocet_slov >= 2:
             if obsahuje_celou_frazi(text, nazev):
                 return True
 
+        return False
+
+    # ---------------------------------------------------------
+    # Projdeme jednotlivé datasety NKOD.
+    # ---------------------------------------------------------
 
     for deska in desky:
+
         title = (
             (deska.get("title") or {}).get("cs")
             or ""
         )
 
+        publisher_data = deska.get("publisher") or {}
+
         publisher = (
-            (deska.get("publisher") or {})
-            .get("title", {})
-            .get("cs")
+            (publisher_data.get("title") or {}).get("cs")
             or ""
         )
 
+        # -----------------------------------------------------
+        # 1. Přednostně párování podle IČO publishera.
+        # -----------------------------------------------------
+
+        publisher_ico = (
+            deska.get("_publisher_ico")
+            or ""
+        ).strip()
+
         nalezena_obec = None
 
-        # Publisher má přednost.
-        for obec in obce:
-            if odpovida_obci(publisher, obec):
-                nalezena_obec = obec
-                break
+        if publisher_ico:
+            for obec in obce:
+                obec_ico = (
+                    obec.get("ico")
+                    or ""
+                ).strip()
 
-        # Pokud publisher nestačí, zkusíme název datasetu.
+                if obec_ico and obec_ico == publisher_ico:
+                    nalezena_obec = obec
+                    break
+
+        # -----------------------------------------------------
+        # 2. Pokud IČO nepomohlo, použijeme dosavadní
+        #    bezpečné párování podle publishera.
+        # -----------------------------------------------------
+
+        if nalezena_obec is None:
+            for obec in obce:
+                if odpovida_obci(publisher, obec):
+                    nalezena_obec = obec
+                    break
+
+        # -----------------------------------------------------
+        # 3. Pokud publisher nestačí, zkusíme dataset.
+        # -----------------------------------------------------
+
         if nalezena_obec is None:
             for obec in obce:
                 if odpovida_obci(title, obec):
@@ -445,7 +467,6 @@ def najdi_kandidaty(obce, desky):
         )
 
     return kandidati
-
 
 def stahni_jsonld(session, deska):
     for distribution in deska.get("distribution") or []:
