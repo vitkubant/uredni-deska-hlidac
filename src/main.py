@@ -1,4 +1,3 @@
-```python
 import csv
 import io
 import json
@@ -1508,4 +1507,3 @@ def hlavni():
 
 if __name__ == "__main__":
     hlavni()
-```
