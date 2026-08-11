@@ -13,6 +13,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import os
+import smtplib
+from email.message import EmailMessage
+
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
@@ -963,12 +967,108 @@ def hlavni():
         print()
 
     # Odeslání výsledku e-mailem.
-    odesli_email(nalezene)
+    def odesli_email(nalezene):
+    smtp_host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
+    smtp_port_text = os.getenv("SMTP_PORT") or "587"
+    smtp_user = os.getenv("SMTP_USER") or ""
+    smtp_password = os.getenv("SMTP_PASSWORD") or ""
+    mail_to = os.getenv("MAIL_TO") or ""
 
-    print("======================================")
-    print(" KONEC")
-    print("======================================")
+    try:
+        smtp_port = int(smtp_port_text)
+    except ValueError:
+        print(f"Chybný SMTP_PORT: {smtp_port_text!r}")
+        smtp_port = 587
 
+    if not smtp_user:
+        print("CHYBA: není nastaven SMTP_USER.")
+        return
+
+    if not smtp_password:
+        print("CHYBA: není nastaven SMTP_PASSWORD.")
+        return
+
+    if not mail_to:
+        print("CHYBA: není nastaven MAIL_TO.")
+        return
+
+    msg = EmailMessage()
+
+    if nalezene:
+        msg["Subject"] = (
+            f"Úřední deska hlídač – "
+            f"{len(nalezene)} nabídek pozemků"
+        )
+
+        text = []
+        text.append("ÚŘEDNÍ DESKA HLÍDAČ")
+        text.append("PARDUBICKÝ KRAJ")
+        text.append("")
+        text.append(
+            f"Nalezeno aktuálních nabídek pozemků: "
+            f"{len(nalezene)}"
+        )
+        text.append("")
+
+        for cislo, item in enumerate(nalezene[:100], start=1):
+            text.append(f"{cislo}. {item['nazev']}")
+            text.append(
+                f"   Obec: {', '.join(item['obce'])}"
+            )
+            text.append(
+                f"   Poskytovatel: {item['publisher']}"
+            )
+            text.append(
+                f"   Vyvěšení: {item['datum']}"
+            )
+
+            if item["url"]:
+                text.append(f"   URL: {item['url']}")
+
+            text.append("")
+
+        msg.set_content("\n".join(text))
+
+    else:
+        msg["Subject"] = (
+            "Úřední deska hlídač – "
+            "žádné aktuální nabídky"
+        )
+
+        msg.set_content(
+            "ÚŘEDNÍ DESKA HLÍDAČ\n"
+            "PARDUBICKÝ KRAJ\n\n"
+            "Za posledních 30 dní nebyla nalezena "
+            "žádná aktuální nabídka pozemku."
+        )
+
+    msg["From"] = smtp_user
+    msg["To"] = mail_to
+
+    print()
+    print("Odesílám e-mail...")
+    print(f"SMTP: {smtp_host}:{smtp_port}")
+    print(f"Příjemce: {mail_to}")
+
+    try:
+        with smtplib.SMTP(
+            smtp_host,
+            smtp_port,
+            timeout=30,
+        ) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(
+                smtp_user,
+                smtp_password,
+            )
+            server.send_message(msg)
+
+        print("✓ E-mail byl úspěšně odeslán.")
+
+    except Exception as error:
+        print(f"✗ Odeslání e-mailu selhalo: {error}")
 
 if __name__ == "__main__":
     hlavni()
