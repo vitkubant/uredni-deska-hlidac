@@ -473,24 +473,99 @@ def stahni_jsonld(
         ):
             continue
 
+        # ----------------------------------------
+        # Normální pokus
+        # ----------------------------------------
+
         try:
 
             response = session.get(
                 url,
-                timeout=20
+                timeout=30
             )
 
             response.raise_for_status()
 
-            return response.json()
+            try:
+                return response.json()
+
+            except ValueError:
+
+                print(
+                    "      Server vrátil neplatný JSON."
+                )
+
+                print(
+                    f"      Content-Type: "
+                    f"{response.headers.get('Content-Type', '')}"
+                )
+
+                print(
+                    f"      HTTP: {response.status_code}"
+                )
+
+                # Pokračujeme na další distribuci,
+                # pokud nějaká existuje.
+                continue
+
+        except requests.exceptions.SSLError as error:
+
+            print(
+                "      SSL chyba."
+            )
+
+            print(
+                "      Zkouším připojení bez ověření certifikátu..."
+            )
+
+            # Některé obecní weby mají špatně nastavený
+            # SSL certifikát. Pro čtení veřejných dat
+            # zkusíme ještě druhý pokus.
+            try:
+
+                response = session.get(
+                    url,
+                    timeout=30,
+                    verify=False
+                )
+
+                response.raise_for_status()
+
+                try:
+                    return response.json()
+
+                except ValueError:
+
+                    print(
+                        "      Ani druhý pokus nevrátil JSON."
+                    )
+
+                    continue
+
+            except Exception as druhy_error:
+
+                print(
+                    f"      Druhý pokus selhal: "
+                    f"{druhy_error}"
+                )
+
+                continue
+
+        except requests.exceptions.RequestException as error:
+
+            print(
+                f"      Chyba připojení: {error}"
+            )
+
+            continue
 
         except Exception as error:
 
             print(
-                f"      Chyba: {error}"
+                f"      Neočekávaná chyba: {error}"
             )
 
-            return None
+            continue
 
     return None
 
