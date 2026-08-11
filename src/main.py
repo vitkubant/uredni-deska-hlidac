@@ -1,49 +1,48 @@
 import requests
+from collections import Counter
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
-# Oficiální standard pro úřední desky
-UREDNI_DESKY_OFN = "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+UREDNI_DESKY_OFN = (
+    "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+)
 
 
 def main():
     print("======================================")
     print("  ÚŘEDNÍ DESKA HLÍDAČ")
-    print("  Vyhledávání úředních desek")
+    print("  Analýza poskytovatelů")
     print("======================================")
     print()
 
-    query = """
-    query {
+    query = f"""
+    query {{
       datasets(
-        limit: 100
-        filters: {
-          conformsTo: "https://ofn.gov.cz/úřední-desky/2021-07-20/"
-        }
-      ) {
-        data {
+        limit: 1000
+        filters: {{
+          conformsTo: "{UREDNI_DESKY_OFN}"
+        }}
+      ) {{
+        data {{
           iri
-          title {
+          title {{
             cs
-          }
-          publisher {
-            title {
+          }}
+          publisher {{
+            title {{
               cs
-            }
-          }
-          distribution {
-            accessURL
-            format
-          }
-        }
-        pagination {
+            }}
+            iri
+          }}
+        }}
+        pagination {{
           totalCount
-        }
-      }
-    }
+        }}
+      }}
+    }}
     """
 
-    print("Hledám datové sady úředních desek v NKOD...")
+    print("Stahuji seznam úředních desek z NKOD...")
     print()
 
     try:
@@ -67,33 +66,79 @@ def main():
         total = datasets["pagination"]["totalCount"]
         data = datasets["data"]
 
-        print(f"Celkem nalezených úředních desek: {total}")
+        print(f"Celkem úředních desek: {total}")
+        print(f"Staženo záznamů: {len(data)}")
         print()
 
-        print("======================================")
-        print("SEZNAM ÚŘEDNÍCH DESEK")
-        print("======================================")
-        print()
+        # Seznam poskytovatelů
+        publishers = []
 
-        for number, dataset in enumerate(data, start=1):
-            title = dataset.get("title") or {}
+        for dataset in data:
             publisher = dataset.get("publisher") or {}
-            
-            title_cs = title.get("cs") or "(bez názvu)"
-            publisher_title = publisher.get("title") or {}
-            publisher_cs = publisher_title.get("cs") or "(neznámý poskytovatel)"
+            title = publisher.get("title") or {}
 
-            print(f"{number}. {title_cs}")
-            print(f"   Poskytovatel: {publisher_cs}")
-            print(f"   IRI: {dataset['iri']}")
+            name = title.get("cs")
 
-            distributions = dataset.get("distribution") or []
+            if name:
+                publishers.append(name)
 
-            for distribution in distributions:
-                if distribution.get("accessURL"):
-                    print(f"   Data: {distribution['accessURL']}")
+        counts = Counter(publishers)
 
-            print()
+        print("======================================")
+        print("POSKYTOVATELÉ ÚŘEDNÍCH DESEK")
+        print("======================================")
+        print()
+
+        for number, (name, count) in enumerate(
+            sorted(counts.items()), start=1
+        ):
+            print(f"{number}. {name} ({count} datových sad)")
+
+        print()
+        print("======================================")
+        print("HLEDÁNÍ PARDUBICKÉHO KRAJE")
+        print("======================================")
+        print()
+
+        # Zatím pouze hledáme záznamy,
+        # kde se v názvu nebo poskytovateli objeví
+        # něco spojeného s Pardubickým krajem.
+        hledane_vyrazy = [
+            "pardub",
+            "chrudim",
+            "svitav",
+            "ústí nad orlicí",
+            "ústi nad orlici"
+        ]
+
+        nalezeno = 0
+
+        for dataset in data:
+            dataset_title = (
+                (dataset.get("title") or {}).get("cs") or ""
+            )
+
+            publisher_title = (
+                (dataset.get("publisher") or {})
+                .get("title", {})
+                .get("cs") or ""
+            )
+
+            text = (
+                dataset_title + " " + publisher_title
+            ).lower()
+
+            if any(vyraz in text for vyraz in hledane_vyrazy):
+                nalezeno += 1
+
+                print(f"{nalezeno}. {dataset_title}")
+                print(f"   Poskytovatel: {publisher_title}")
+                print(f"   IRI: {dataset['iri']}")
+                print()
+
+        print(
+            f"Nalezeno kandidátů podle názvu: {nalezeno}"
+        )
 
     except Exception as e:
         print("Nastala chyba:")
