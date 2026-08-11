@@ -967,7 +967,7 @@ def hlavni():
         print()
 
     # Odeslání výsledku e-mailem.
-    def odesli_email(nalezene):
+def odesli_email(nalezene):
     smtp_host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
     smtp_port_text = os.getenv("SMTP_PORT") or "587"
     smtp_user = os.getenv("SMTP_USER") or ""
