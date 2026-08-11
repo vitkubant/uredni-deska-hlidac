@@ -373,11 +373,10 @@ def najdi_kandidaty(obce, desky):
         # U víceslovných názvů je shoda celého názvu bezpečnější.
         pocet_slov = len(nazev.split())
 
-if pocet_slov >= 2:
-    if obsahuje_celou_frazi(text, nazev):
-        return True
+        if pocet_slov >= 2:
+            if obsahuje_celou_frazi(text, nazev):
+                return True
 
-        return False
 
     for deska in desky:
         title = (
