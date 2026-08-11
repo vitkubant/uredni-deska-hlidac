@@ -518,6 +518,69 @@ def ziskej_informace(data):
 
     return informace
 
+
+def ziskej_datum_vyveseni(item):
+    """
+    Pokusí se najít datum vyvěšení v datech informace.
+    """
+
+    if not isinstance(item, dict):
+        return None
+
+    # Nejčastější přímé názvy polí.
+    klice = (
+        "datumVyveseni",
+        "datum_vyveseni",
+        "vyveseni",
+        "datumZverejneni",
+        "datum_zverejneni",
+        "zverejneni",
+    )
+
+    for klic in klice:
+
+        hodnota = item.get(klic)
+
+        if hodnota:
+            return hodnota
+
+    # Pokud je datum uvnitř vnořených objektů,
+    # projdeme strukturu rekurzivně.
+    nalezene = []
+
+    def projdi(obj):
+
+        if isinstance(obj, dict):
+
+            for klic, hodnota in obj.items():
+
+                klic_text = bez_diakritiky(
+                    str(klic)
+                )
+
+                if (
+                    "vyves" in klic_text
+                    or "zverej" in klic_text
+                ):
+
+                    if hodnota:
+                        nalezene.append(hodnota)
+
+                projdi(hodnota)
+
+        elif isinstance(obj, list):
+
+            for hodnota in obj:
+                projdi(hodnota)
+
+    projdi(item)
+
+    if nalezene:
+        return nalezene[0]
+
+    return None
+
+
 def je_aktualni_datum(datum):
     """
     Vrátí True pouze pro záznamy zveřejněné
@@ -544,6 +607,7 @@ def je_aktualni_datum(datum):
         return False
 
     try:
+
         datum_obj = datetime.strptime(
             match.group(1),
             "%Y-%m-%d"
@@ -559,6 +623,7 @@ def je_aktualni_datum(datum):
     )
 
     return hranice <= datum_obj <= dnes
+
 
 def text_informace(item):
 
@@ -738,6 +803,7 @@ def je_aktualni_nabidka_pozemku(item):
 
     return False
 
+
 def hlavni():
 
     print(
@@ -884,48 +950,66 @@ def hlavni():
             f"   {len(informace)} informací"
         )
 
-for item in informace:
+        for item in informace:
 
-    # --------------------------------
-    # Datum vyvěšení
-    # --------------------------------
+            # --------------------------------
+            # Datum vyvěšení
+            # --------------------------------
 
-    datum = ziskej_datum_vyveseni(item)
+            datum = ziskej_datum_vyveseni(item)
 
-    # --------------------------------
-    # Pouze aktuální dokumenty
-    # --------------------------------
+            # --------------------------------
+            # Pouze aktuální dokumenty
+            # --------------------------------
 
-    if not je_aktualni_datum(datum):
-        continue
+            if not je_aktualni_datum(datum):
+                continue
 
-    # --------------------------------
-    # Pouze nabídky pozemků
-    # --------------------------------
+            # --------------------------------
+            # Pouze nabídky pozemků
+            # --------------------------------
 
-    if not je_aktualni_nabidka_pozemku(item):
-        continue
+            if not je_aktualni_nabidka_pozemku(item):
+                continue
 
-    # --------------------------------
-    # Název
-    # --------------------------------
+            # --------------------------------
+            # Název
+            # --------------------------------
 
-    nazev = (
-        (
-            item.get("název")
-            or {}
-        ).get("cs")
-        or "Bez názvu"
-    )
+            nazev = (
+                (
+                    item.get("název")
+                    or {}
+                ).get("cs")
+                or "Bez názvu"
+            )
 
-    # --------------------------------
-    # URL
-    # --------------------------------
+            # --------------------------------
+            # URL
+            # --------------------------------
 
-    url = (
-        item.get("url")
-        or ""
-    )
+            url = (
+                item.get("url")
+                or ""
+            )
+
+            # --------------------------------
+            # Uložení nalezené nabídky
+            # --------------------------------
+
+            nalezene.append(
+                {
+                    "nazev": nazev,
+                    "url": url,
+                    "datum": datum,
+                    "obce": [
+                        obec["nazev"]
+                        for obec in kandidat["obce"]
+                    ],
+                    "publisher": publisher,
+                }
+            )
+
     # ------------------------------------
     # 4b. Odstranění duplicit
     # ------------------------------------
@@ -942,7 +1026,7 @@ for item in informace:
                 + "|"
                 + item["nazev"]
                 + "|"
-                + item["datum"]
+                + str(item["datum"])
             )
         )
 
@@ -959,7 +1043,6 @@ for item in informace:
         f"Aktuálních nabídek pozemků: "
         f"{len(nalezene)}"
     )
-
 
     # ------------------------------------
     # 5. Výsledky
