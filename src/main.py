@@ -13,27 +13,23 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-import os
-import smtplib
-from email.message import EmailMessage
-
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
-
 RUIAN_URL = "https://services.cuzk.cz/sestavy/cis/UI_OBEC.zip"
 
+# NKOD pouziva u urednich desek obe varianty OFN URI.
 UREDNI_DESKY_OFN = (
-    "https://ofn.gov.cz/uredni-desky/2021-07-20/"
+    "https://ofn.gov.cz/úřední-desky/2021-07-20/",
+    "https://ofn.gov.cz/úřední-desky/",
 )
 
 PARDUBICKY_OKRESY = {
     "3603",  # Chrudim
     "3606",  # Pardubice
     "3609",  # Svitavy
-    "3611",  # Ústí nad Orlicí
+    "3611",  # Usti nad Orlici
 }
 
-# Vždy se počítá od dnešního data.
 MAX_STARI_DNI = 30
 
 USER_AGENT = (
@@ -46,8 +42,7 @@ def bez_diakritiky(text):
     text = text or ""
     text = unicodedata.normalize("NFKD", str(text))
     return "".join(
-        znak for znak in text
-        if not unicodedata.combining(znak)
+        znak for znak in text if not unicodedata.combining(znak)
     ).lower().strip()
 
 
@@ -65,7 +60,6 @@ def vytvor_session():
     )
 
     adapter = HTTPAdapter(max_retries=retry)
-
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
@@ -80,7 +74,7 @@ def vytvor_session():
 
 
 def nacti_obce(session):
-    print("Stahuji obce Pardubického kraje...")
+    print("Stahuji obce Pardubickeho kraje...")
     print()
 
     response = session.get(RUIAN_URL, timeout=60)
@@ -88,15 +82,12 @@ def nacti_obce(session):
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         csv_soubory = [
-            x
-            for x in archive.namelist()
+            x for x in archive.namelist()
             if x.lower().endswith(".csv")
         ]
 
         if not csv_soubory:
-            raise RuntimeError(
-                "V RÚIAN ZIP nebyl nalezen CSV soubor."
-            )
+            raise RuntimeError("V RUIAN ZIP nebyl nalezen CSV soubor.")
 
         raw = archive.read(csv_soubory[0])
 
@@ -110,13 +101,9 @@ def nacti_obce(session):
             pass
 
     if text is None:
-        raise RuntimeError("CSV se nepodařilo dekódovat.")
+        raise RuntimeError("CSV se nepodarilo dekodovat.")
 
-    reader = csv.DictReader(
-        io.StringIO(text),
-        delimiter=";",
-    )
-
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
     obce = []
 
     for row in reader:
@@ -142,56 +129,56 @@ def nacti_obce(session):
             }
         )
 
-    print(f"Nalezeno obcí: {len(obce)}")
+    print(f"Nalezeno obci: {len(obce)}")
     return obce
 
 
-def nacti_uredni_desky(session):
-    print()
-    print("Stahuji metadata úředních desek z NKOD...")
-
-    query = f"""
-    query {{
+def graphql_dotaz(session, ofn_uri):
+    query = """
+    query($ofn: String!) {
       datasets(
         limit: 1000
-        filters: {{
-          conformsTo: "{UREDNI_DESKY_OFN}"
-        }}
-      ) {{
-        data {{
+        filters: {
+          conformsTo: $ofn
+        }
+      ) {
+        data {
           iri
-          title {{
+          title {
             cs
-          }}
-          publisher {{
-            title {{
+          }
+          publisher {
+            title {
               cs
-            }}
+            }
             iri
-          }}
-          distribution {{
+          }
+          distribution {
             accessURL
             format
-          }}
-        }}
-        pagination {{
+          }
+        }
+        pagination {
           totalCount
-        }}
-      }}
-    }}
+        }
+      }
+    }
     """
 
     response = session.post(
         NKOD_GRAPHQL,
-        json={"query": query},
+        json={
+            "query": query,
+            "variables": {"ofn": ofn_uri},
+        },
         timeout=60,
     )
-
     response.raise_for_status()
 
     result = response.json()
 
     if "errors" in result:
+        print("  GraphQL chyba:")
         print(
             json.dumps(
                 result["errors"],
@@ -199,24 +186,58 @@ def nacti_uredni_desky(session):
                 ensure_ascii=False,
             )
         )
-        raise RuntimeError(
-            "NKOD GraphQL vrátil chybu."
-        )
+        return None
 
-    datasets = result["data"]["datasets"]
+    datasets = (result.get("data") or {}).get("datasets")
 
-    print(
-        f"NKOD úředních desek: "
-        f"{datasets['pagination']['totalCount']}"
-    )
+    if not datasets:
+        return None
 
-    return datasets["data"]
+    return datasets
+
+
+def nacti_uredni_desky(session):
+    print()
+    print("Stahuji metadata urednich desek z NKOD...")
+
+    vsechny = {}
+    uspesne_dotazy = 0
+
+    for ofn_uri in UREDNI_DESKY_OFN:
+        print(f"  Zkousim OFN: {ofn_uri}")
+
+        datasets = graphql_dotaz(session, ofn_uri)
+
+        if datasets is None:
+            print("  Dotaz se nepodaril.")
+            continue
+
+        uspesne_dotazy += 1
+        celkem = datasets["pagination"]["totalCount"]
+        data = datasets.get("data") or []
+
+        print(f"  NKOD vratil: {celkem} datovych sad")
+        print(f"  Nacteno v tomto dotazu: {len(data)}")
+
+        for deska in data:
+            iri = deska.get("iri") or ""
+            if iri:
+                vsechny[iri] = deska
+
+    if uspesne_dotazy == 0:
+        raise RuntimeError("Nepodarilo se uskutecnit zadny NKOD dotaz.")
+
+    desky = list(vsechny.values())
+
+    print(f"NKOD urednich desek celkem po slouceni: {len(desky)}")
+
+    return desky
 
 
 def najdi_kandidaty(obce, desky):
     """
-    Přiřadí úřední desku ke konkrétní obci.
-    Používá přesnější shodu názvu.
+    Priradi uredni desku ke konkretni obci.
+    Nepouziva obecny substring, aby se nepletly podobne nazvy.
     """
 
     kandidati = []
@@ -246,10 +267,7 @@ def najdi_kandidaty(obce, desky):
             "nemocnice",
         )
 
-        if any(
-            text.startswith(zakaz)
-            for zakaz in zakazane
-        ):
+        if any(text.startswith(zakaz) for zakaz in zakazane):
             return False
 
         mozne_tvary = (
@@ -270,7 +288,6 @@ def najdi_kandidaty(obce, desky):
 
         odstranovaci_prefixy = (
             "uredni deska - ",
-            "uredni deska – ",
             "uredni deska mesta ",
             "uredni deska obce ",
             "uredni deska mestyse ",
@@ -281,7 +298,6 @@ def najdi_kandidaty(obce, desky):
         for prefix in odstranovaci_prefixy:
             if text.startswith(prefix):
                 zbytek = text[len(prefix):].strip()
-
                 if zbytek == nazev:
                     return True
 
@@ -293,7 +309,6 @@ def najdi_kandidaty(obce, desky):
         ):
             if text.startswith(prefix):
                 zbytek = text[len(prefix):].strip()
-
                 if zbytek == nazev:
                     return True
 
@@ -346,44 +361,32 @@ def stahni_jsonld(session, deska):
         if not url:
             continue
 
+        format_text = str(format_data).lower()
+
         if (
-            "json" not in format_data.lower()
-            and not url.lower().endswith(
-                (".json", ".jsonld")
-            )
+            "json" not in format_text
+            and not url.lower().endswith((".json", ".jsonld"))
         ):
             continue
 
         try:
-            response = session.get(
-                url,
-                timeout=30,
-            )
-
+            response = session.get(url, timeout=30)
             response.raise_for_status()
 
             try:
                 return response.json()
-
             except ValueError:
-                print(
-                    "      Server vrátil neplatný JSON."
-                )
+                print("      Server vratil neplatny JSON.")
                 print(
                     f"      Content-Type: "
                     f"{response.headers.get('Content-Type', '')}"
                 )
-                print(
-                    f"      HTTP: {response.status_code}"
-                )
+                print(f"      HTTP: {response.status_code}")
                 continue
 
         except requests.exceptions.SSLError:
             print("      SSL chyba.")
-            print(
-                "      Zkouším připojení bez "
-                "ověření certifikátu..."
-            )
+            print("      Zkousim pripojeni bez overeni certifikatu...")
 
             try:
                 response = session.get(
@@ -391,36 +394,24 @@ def stahni_jsonld(session, deska):
                     timeout=30,
                     verify=False,
                 )
-
                 response.raise_for_status()
 
                 try:
                     return response.json()
-
                 except ValueError:
-                    print(
-                        "      Ani druhý pokus "
-                        "nevrátil JSON."
-                    )
+                    print("      Ani druhy pokus nevratil JSON.")
                     continue
 
             except Exception as druhy_error:
-                print(
-                    f"      Druhý pokus selhal: "
-                    f"{druhy_error}"
-                )
+                print(f"      Druhy pokus selhal: {druhy_error}")
                 continue
 
         except requests.exceptions.RequestException as error:
-            print(
-                f"      Chyba připojení: {error}"
-            )
+            print(f"      Chyba pripojeni: {error}")
             continue
 
         except Exception as error:
-            print(
-                f"      Neočekávaná chyba: {error}"
-            )
+            print(f"      Neocekavana chyba: {error}")
             continue
 
     return None
@@ -438,6 +429,18 @@ def ziskej_informace(data):
     return informace
 
 
+def ziskej_text_cs(hodnota):
+    if isinstance(hodnota, dict):
+        return (
+            hodnota.get("cs")
+            or hodnota.get("cze")
+            or hodnota.get("cs-CZ")
+            or ""
+        )
+
+    return str(hodnota or "")
+
+
 def ziskej_datum_vyveseni(item):
     if not isinstance(item, dict):
         return None
@@ -453,7 +456,6 @@ def ziskej_datum_vyveseni(item):
 
     for klic in klice:
         hodnota = item.get(klic)
-
         if hodnota:
             return hodnota
 
@@ -462,14 +464,9 @@ def ziskej_datum_vyveseni(item):
     def projdi(obj):
         if isinstance(obj, dict):
             for klic, hodnota in obj.items():
-                klic_text = bez_diakritiky(
-                    str(klic)
-                )
+                klic_text = bez_diakritiky(str(klic))
 
-                if (
-                    "vyves" in klic_text
-                    or "zverej" in klic_text
-                ):
+                if "vyves" in klic_text or "zverej" in klic_text:
                     if hodnota:
                         nalezene.append(hodnota)
 
@@ -481,11 +478,7 @@ def ziskej_datum_vyveseni(item):
 
     projdi(item)
 
-    return (
-        nalezene[0]
-        if nalezene
-        else None
-    )
+    return nalezene[0] if nalezene else None
 
 
 def je_aktualni_datum(datum):
@@ -494,18 +487,10 @@ def je_aktualni_datum(datum):
 
     datum_text = str(datum).strip()
 
-    if datum_text in (
-        "?",
-        "",
-        "None",
-        "null",
-    ):
+    if datum_text in ("?", "", "None", "null"):
         return False
 
-    match = re.search(
-        r"\b(20\d{2}-\d{2}-\d{2})\b",
-        datum_text,
-    )
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", datum_text)
 
     if not match:
         return False
@@ -515,14 +500,11 @@ def je_aktualni_datum(datum):
             match.group(1),
             "%Y-%m-%d",
         ).date()
-
     except ValueError:
         return False
 
     dnes = date.today()
-    hranice = (
-        dnes - timedelta(days=MAX_STARI_DNI)
-    )
+    hranice = dnes - timedelta(days=MAX_STARI_DNI)
 
     return hranice <= datum_obj <= dnes
 
@@ -531,11 +513,7 @@ def je_aktualni_nabidka_pozemku(item):
     if not isinstance(item, dict):
         return False
 
-    nazev = (
-        (item.get("název") or {}).get("cs")
-        or ""
-    )
-
+    nazev = ziskej_text_cs(item.get("název"))
     text = bez_diakritiky(nazev)
 
     pozemek = any(
@@ -565,10 +543,7 @@ def je_aktualni_nabidka_pozemku(item):
         "verejna vyhlaska",
     )
 
-    if any(
-        slovo in text
-        for slovo in nechtene
-    ):
+    if any(slovo in text for slovo in nechtene):
         return False
 
     nechtene_obchody = (
@@ -584,10 +559,7 @@ def je_aktualni_nabidka_pozemku(item):
         "darovat",
     )
 
-    if any(
-        slovo in text
-        for slovo in nechtene_obchody
-    ):
+    if any(slovo in text for slovo in nechtene_obchody):
         return False
 
     prodej = any(
@@ -625,145 +597,81 @@ def je_aktualni_nabidka_pozemku(item):
 
 
 def odesli_email(nalezene):
-    """
-    Odešle výsledky přes Gmail SMTP.
-    Hodnoty jsou načítány z GitHub Secrets.
-    """
+    smtp_host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
+    smtp_port_text = os.getenv("SMTP_PORT") or "587"
+    smtp_user = os.getenv("SMTP_USER") or ""
+    smtp_password = os.getenv("SMTP_PASSWORD") or ""
+    mail_to = os.getenv("MAIL_TO") or ""
 
-    smtp_host = os.environ.get(
-        "SMTP_HOST",
-        "smtp.gmail.com",
-    )
-
-    smtp_port = int(
-        os.environ.get(
-            "SMTP_PORT",
-            "587",
+    if not smtp_user or not smtp_password or not mail_to:
+        print()
+        print(
+            "E-mail neposilam: chybi SMTP_USER, "
+            "SMTP_PASSWORD nebo MAIL_TO."
         )
+        return False
+
+    try:
+        smtp_port = int(smtp_port_text)
+    except ValueError:
+        print(f"Chybna hodnota SMTP_PORT: {smtp_port_text!r}")
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = (
+        f"Uredni deska hlidac - {len(nalezene)} nabidek pozemku"
     )
-
-    smtp_user = os.environ.get(
-        "SMTP_USER",
-        "",
-    )
-
-    smtp_password = os.environ.get(
-        "SMTP_PASSWORD",
-        "",
-    )
-
-    mail_to = os.environ.get(
-        "MAIL_TO",
-        "",
-    )
-
-    if not smtp_user:
-        raise RuntimeError(
-            "Chybí SMTP_USER."
-        )
-
-    if not smtp_password:
-        raise RuntimeError(
-            "Chybí SMTP_PASSWORD."
-        )
-
-    if not mail_to:
-        raise RuntimeError(
-            "Chybí MAIL_TO."
-        )
+    msg["From"] = smtp_user
+    msg["To"] = mail_to
 
     if nalezene:
-        predmet = (
-            f"Úřední deska – "
-            f"{len(nalezene)} nabídek pozemků"
-        )
-
         radky = [
-            "Hlídač pozemků – Pardubický kraj",
-            "",
-            f"Nalezeno nabídek: {len(nalezene)}",
+            "Nalezene aktualni nabidky pozemku v Pardubickem kraji:",
             "",
         ]
 
-        for cislo, item in enumerate(
-            nalezene,
-            start=1,
-        ):
-            radky.append(
-                f"{cislo}. {item['nazev']}"
-            )
-
-            radky.append(
-                f"   Obec: "
-                f"{', '.join(item['obce'])}"
-            )
-
-            radky.append(
-                f"   Poskytovatel: "
-                f"{item['publisher']}"
-            )
-
-            radky.append(
-                f"   Vyvěšení: "
-                f"{item['datum']}"
-            )
+        for cislo, item in enumerate(nalezene[:100], start=1):
+            radky.append(f"{cislo}. {item['nazev']}")
+            radky.append(f"Obec: {', '.join(item['obce'])}")
+            radky.append(f"Poskytovatel: {item['publisher']}")
+            radky.append(f"Vyveseni: {item['datum']}")
 
             if item["url"]:
-                radky.append(
-                    f"   URL: {item['url']}"
-                )
+                radky.append(f"URL: {item['url']}")
 
             radky.append("")
-
-        telo = "\n".join(radky)
-
     else:
-        predmet = (
-            "Úřední deska – "
-            "žádné nové nabídky pozemků"
-        )
+        radky = [
+            "Hlidac dokoncil kontrolu.",
+            "",
+            "Aktualne nebyla nalezena zadna nabidka pozemku.",
+        ]
 
-        telo = (
-            "Hlídač pozemků – Pardubický kraj\n\n"
-            "Za posledních "
-            f"{MAX_STARI_DNI} dní nebyla nalezena "
-            "žádná odpovídající nabídka pozemku."
-        )
+    msg.set_content("\n".join(radky))
 
-    zprava = EmailMessage()
+    try:
+        print()
+        print("Posilam e-mail...")
 
-    zprava["From"] = smtp_user
-    zprava["To"] = mail_to
-    zprava["Subject"] = predmet
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(smtp_user, smtp_password)
+            smtp.send_message(msg)
 
-    zprava.set_content(telo)
+        print("E-mail odeslan.")
+        return True
 
-    print()
-    print("Odesílám e-mail...")
-
-    with smtplib.SMTP(
-        smtp_host,
-        smtp_port,
-        timeout=30,
-    ) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(
-            smtp_user,
-            smtp_password,
-        )
-        server.send_message(zprava)
-
-    print(
-        f"E-mail úspěšně odeslán na: {mail_to}"
-    )
+    except Exception as error:
+        print(f"E-mail se nepodarilo odeslat: {error}")
+        return False
 
 
 def hlavni():
     print("======================================")
-    print(" ÚŘEDNÍ DESKA HLÍDAČ")
-    print(" PARDUBICKÝ KRAJ")
+    print(" UREDNI DESKA HLIDAC")
+    print(" PARDUBICKY KRAJ")
     print("======================================")
     print()
 
@@ -773,21 +681,12 @@ def hlavni():
     desky = nacti_uredni_desky(session)
 
     print()
-    print(
-        "Hledám možné úřední desky "
-        "obcí Pardubického kraje..."
-    )
+    print("Hledam mozne uredni desky obci Pardubickeho kraje...")
 
-    kandidati = najdi_kandidaty(
-        obce,
-        desky,
-    )
+    kandidati = najdi_kandidaty(obce, desky)
 
     print()
-    print(
-        f"Kandidátních úředních desek: "
-        f"{len(kandidati)}"
-    )
+    print(f"Kandidatnich urednich desek: {len(kandidati)}")
     print()
 
     for kandidat in kandidati:
@@ -795,87 +694,65 @@ def hlavni():
 
         title = (
             (deska.get("title") or {}).get("cs")
-            or "Bez názvu"
+            or "Bez nazvu"
         )
 
         publisher = (
             (deska.get("publisher") or {})
             .get("title", {})
             .get("cs")
-            or "Neznámý"
+            or "Neznamy"
         )
 
         obce_text = ", ".join(
-            obec["nazev"]
-            for obec in kandidat["obce"]
+            obec["nazev"] for obec in kandidat["obce"]
         )
 
         print(f"✓ {publisher}")
         print(f"  Dataset: {title}")
-        print(
-            f"  Pravděpodobná obec: "
-            f"{obce_text}"
-        )
+        print(f"  Pravdepodobna obec: {obce_text}")
 
     print()
     print("======================================")
-    print(" STAHUJI VYBRANÉ ÚŘEDNÍ DESKY")
+    print(" STAHUJI VYBRANE UREDNI DESKY")
     print("======================================")
     print()
 
     nalezene = []
 
-    for cislo, kandidat in enumerate(
-        kandidati,
-        start=1,
-    ):
+    for cislo, kandidat in enumerate(kandidati, start=1):
         deska = kandidat["deska"]
 
         publisher = (
             (deska.get("publisher") or {})
             .get("title", {})
             .get("cs")
-            or "Neznámý"
+            or "Neznamy"
         )
 
-        print(
-            f"[{cislo}/{len(kandidati)}] "
-            f"{publisher}"
-        )
+        print(f"[{cislo}/{len(kandidati)}] {publisher}")
 
-        data = stahni_jsonld(
-            session,
-            deska,
-        )
+        data = stahni_jsonld(session, deska)
 
         if data is None:
-            print(
-                "   ✗ nepodařilo se stáhnout"
-            )
+            print("   ✗ nepodarilo se stahnout")
             continue
 
         informace = ziskej_informace(data)
-
-        print(
-            f"   {len(informace)} informací"
-        )
+        print(f"   {len(informace)} informaci")
 
         for item in informace:
-            datum = ziskej_datum_vyveseni(
-                item
-            )
+            datum = ziskej_datum_vyveseni(item)
 
             if not je_aktualni_datum(datum):
                 continue
 
-            if not je_aktualni_nabidka_pozemku(
-                item
-            ):
+            if not je_aktualni_nabidka_pozemku(item):
                 continue
 
             nazev = (
-                (item.get("název") or {}).get("cs")
-                or "Bez názvu"
+                ziskej_text_cs(item.get("název"))
+                or "Bez nazvu"
             )
 
             url = item.get("url") or ""
@@ -922,153 +799,35 @@ def hlavni():
     )
 
     print()
-    print(
-        f"Aktuálních nabídek pozemků: "
-        f"{len(nalezene)}"
-    )
-
+    print(f"Aktualnich nabidek pozemku: {len(nalezene)}")
     print()
     print("======================================")
-    print(" NALEZENÉ KANDIDÁTNÍ NABÍDKY")
+    print(" NALEZENE KANDIDATNI NABIDKY")
     print("======================================")
     print()
-
     print(f"Celkem: {len(nalezene)}")
     print()
 
-    for cislo, item in enumerate(
-        nalezene[:100],
-        start=1,
-    ):
-        print(
-            f"{cislo}. {item['nazev']}"
-        )
-
-        print(
-            f"   Obec: "
-            f"{', '.join(item['obce'])}"
-        )
-
-        print(
-            f"   Poskytovatel: "
-            f"{item['publisher']}"
-        )
-
-        print(
-            f"   Vyvěšení: "
-            f"{item['datum']}"
-        )
+    for cislo, item in enumerate(nalezene[:100], start=1):
+        print(f"{cislo}. {item['nazev']}")
+        print(f"   Obec: {', '.join(item['obce'])}")
+        print(f"   Poskytovatel: {item['publisher']}")
+        print(f"   Vyveseni: {item['datum']}")
 
         if item["url"]:
-            print(
-                f"   URL: {item['url']}"
-            )
+            print(f"   URL: {item['url']}")
 
         print()
 
-    # Odeslání výsledku e-mailem.
-def odesli_email(nalezene):
-    smtp_host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
-    smtp_port_text = os.getenv("SMTP_PORT") or "587"
-    smtp_user = os.getenv("SMTP_USER") or ""
-    smtp_password = os.getenv("SMTP_PASSWORD") or ""
-    mail_to = os.getenv("MAIL_TO") or ""
-
-    try:
-        smtp_port = int(smtp_port_text)
-    except ValueError:
-        print(f"Chybný SMTP_PORT: {smtp_port_text!r}")
-        smtp_port = 587
-
-    if not smtp_user:
-        print("CHYBA: není nastaven SMTP_USER.")
-        return
-
-    if not smtp_password:
-        print("CHYBA: není nastaven SMTP_PASSWORD.")
-        return
-
-    if not mail_to:
-        print("CHYBA: není nastaven MAIL_TO.")
-        return
-
-    msg = EmailMessage()
-
-    if nalezene:
-        msg["Subject"] = (
-            f"Úřední deska hlídač – "
-            f"{len(nalezene)} nabídek pozemků"
-        )
-
-        text = []
-        text.append("ÚŘEDNÍ DESKA HLÍDAČ")
-        text.append("PARDUBICKÝ KRAJ")
-        text.append("")
-        text.append(
-            f"Nalezeno aktuálních nabídek pozemků: "
-            f"{len(nalezene)}"
-        )
-        text.append("")
-
-        for cislo, item in enumerate(nalezene[:100], start=1):
-            text.append(f"{cislo}. {item['nazev']}")
-            text.append(
-                f"   Obec: {', '.join(item['obce'])}"
-            )
-            text.append(
-                f"   Poskytovatel: {item['publisher']}"
-            )
-            text.append(
-                f"   Vyvěšení: {item['datum']}"
-            )
-
-            if item["url"]:
-                text.append(f"   URL: {item['url']}")
-
-            text.append("")
-
-        msg.set_content("\n".join(text))
-
-    else:
-        msg["Subject"] = (
-            "Úřední deska hlídač – "
-            "žádné aktuální nabídky"
-        )
-
-        msg.set_content(
-            "ÚŘEDNÍ DESKA HLÍDAČ\n"
-            "PARDUBICKÝ KRAJ\n\n"
-            "Za posledních 30 dní nebyla nalezena "
-            "žádná aktuální nabídka pozemku."
-        )
-
-    msg["From"] = smtp_user
-    msg["To"] = mail_to
+    # E-mail se odesila i pri nule vysledku,
+    # aby byl test jednoznacny.
+    odesli_email(nalezene)
 
     print()
-    print("Odesílám e-mail...")
-    print(f"SMTP: {smtp_host}:{smtp_port}")
-    print(f"Příjemce: {mail_to}")
+    print("======================================")
+    print(" KONEC")
+    print("======================================")
 
-    try:
-        with smtplib.SMTP(
-            smtp_host,
-            smtp_port,
-            timeout=30,
-        ) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(
-                smtp_user,
-                smtp_password,
-            )
-            server.send_message(msg)
-
-        print("✓ E-mail byl úspěšně odeslán.")
-
-    except Exception as error:
-        print(f"✗ Odeslání e-mailu selhalo: {error}")
 
 if __name__ == "__main__":
     hlavni()
