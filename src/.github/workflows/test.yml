@@ -1,0 +1,26 @@
+name: Test hlídače
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Stažení projektu
+        uses: actions/checkout@v4
+
+      - name: Nastavení Pythonu
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalace závislostí
+        run: |
+          pip install -r requirements.txt
+
+      - name: Spuštění programu
+        run: |
+          python src/main.py
