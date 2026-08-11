@@ -4,19 +4,16 @@ import json
 import re
 import unicodedata
 import zipfile
-import time
 from datetime import date, datetime, timedelta
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
-
 RUIAN_URL = "https://services.cuzk.cz/sestavy/cis/UI_OBEC.zip"
-
-UREDNI_DESKY_OFN = (
-    "https://ofn.gov.cz/úřední-desky/2021-07-20/"
-)
+UREDNI_DESKY_OFN = "https://ofn.gov.cz/úřední-desky/2021-07-20/"
 
 PARDUBICKY_OKRESY = {
     "3603",  # Chrudim
@@ -25,40 +22,59 @@ PARDUBICKY_OKRESY = {
     "3611",  # Ústí nad Orlicí
 }
 
-# Kolik dní zpět chceme sledovat nové nabídky.
+# Vždy se počítá od dnešního data.
+# Skript tedy není potřeba po roce upravovat.
 MAX_STARI_DNI = 30
+
+USER_AGENT = (
+    "UredniDeskaHlídac/1.0 "
+    "(monitoring veřejných úředních desek)"
+)
 
 
 def bez_diakritiky(text):
     text = text or ""
-
-    text = unicodedata.normalize(
-        "NFKD",
-        text
-    )
-
+    text = unicodedata.normalize("NFKD", str(text))
     return "".join(
-        znak
-        for znak in text
-        if not unicodedata.combining(znak)
+        znak for znak in text if not unicodedata.combining(znak)
     ).lower().strip()
 
 
-def nacti_obce():
+def vytvor_session():
+    session = requests.Session()
+
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
+        }
+    )
+
+    return session
+
+
+def nacti_obce(session):
     print("Stahuji obce Pardubického kraje...")
     print()
 
-    response = requests.get(
-        RUIAN_URL,
-        timeout=60
-    )
-
+    response = session.get(RUIAN_URL, timeout=60)
     response.raise_for_status()
 
-    with zipfile.ZipFile(
-        io.BytesIO(response.content)
-    ) as archive:
-
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         csv_soubory = [
             x for x in archive.namelist()
             if x.lower().endswith(".csv")
@@ -69,17 +85,11 @@ def nacti_obce():
                 "V RÚIAN ZIP nebyl nalezen CSV soubor."
             )
 
-        raw = archive.read(
-            csv_soubory[0]
-        )
+        raw = archive.read(csv_soubory[0])
 
     text = None
 
-    for encoding in (
-        "utf-8-sig",
-        "cp1250",
-        "latin-1",
-    ):
+    for encoding in ("utf-8-sig", "cp1250", "latin-1"):
         try:
             text = raw.decode(encoding)
             break
@@ -87,38 +97,16 @@ def nacti_obce():
             pass
 
     if text is None:
-        raise RuntimeError(
-            "CSV se nepodařilo dekódovat."
-        )
+        raise RuntimeError("CSV se nepodařilo dekódovat.")
 
-    reader = csv.DictReader(
-        io.StringIO(text),
-        delimiter=";"
-    )
-
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
     obce = []
 
     for row in reader:
-
-        kod = (
-            row.get("KOD")
-            or ""
-        ).strip()
-
-        nazev = (
-            row.get("NAZEV")
-            or ""
-        ).strip()
-
-        okres = (
-            row.get("OKRES_KOD")
-            or ""
-        ).strip()
-
-        plati_do = (
-            row.get("PLATI_DO")
-            or ""
-        ).strip()
+        kod = (row.get("KOD") or "").strip()
+        nazev = (row.get("NAZEV") or "").strip()
+        okres = (row.get("OKRES_KOD") or "").strip()
+        plati_do = (row.get("PLATI_DO") or "").strip()
 
         if not kod or not nazev:
             continue
@@ -133,23 +121,17 @@ def nacti_obce():
             {
                 "kod": kod,
                 "nazev": nazev,
-                "normalizovany_nazev":
-                    bez_diakritiky(nazev),
+                "normalizovany_nazev": bez_diakritiky(nazev),
             }
         )
 
-    print(
-        f"Nalezeno obcí: {len(obce)}"
-    )
-
+    print(f"Nalezeno obcí: {len(obce)}")
     return obce
 
 
-def nacti_uredni_desky():
+def nacti_uredni_desky(session):
     print()
-    print(
-        "Stahuji metadata úředních desek z NKOD..."
-    )
+    print("Stahuji metadata úředních desek z NKOD...")
 
     query = f"""
     query {{
@@ -161,24 +143,20 @@ def nacti_uredni_desky():
       ) {{
         data {{
           iri
-
           title {{
             cs
           }}
-
           publisher {{
             title {{
               cs
             }}
             iri
           }}
-
           distribution {{
             accessURL
             format
           }}
         }}
-
         pagination {{
           totalCount
         }}
@@ -186,14 +164,11 @@ def nacti_uredni_desky():
     }}
     """
 
-    response = requests.post(
+    response = session.post(
         NKOD_GRAPHQL,
-        json={
-            "query": query
-        },
-        timeout=60
+        json={"query": query},
+        timeout=60,
     )
-
     response.raise_for_status()
 
     result = response.json()
@@ -203,13 +178,10 @@ def nacti_uredni_desky():
             json.dumps(
                 result["errors"],
                 indent=2,
-                ensure_ascii=False
+                ensure_ascii=False,
             )
         )
-
-        raise RuntimeError(
-            "NKOD GraphQL vrátil chybu."
-        )
+        raise RuntimeError("NKOD GraphQL vrátil chybu.")
 
     datasets = result["data"]["datasets"]
 
@@ -223,44 +195,20 @@ def nacti_uredni_desky():
 
 def najdi_kandidaty(obce, desky):
     """
-    Spolehlivější přiřazení úřední desky ke konkrétní obci.
-
-    Nepoužíváme substring typu:
-        "Moravany" in "Moravany u Brna"
-
-    ale snažíme se získat skutečný název
-    organizace a porovnat ho s celým názvem obce.
+    Přiřadí úřední desku ke konkrétní obci.
+    Používá přesnější shodu názvu, nikoli obecný substring.
     """
 
     kandidati = []
 
-    # ----------------------------------------
-    # Pomocná funkce
-    # ----------------------------------------
-
     def cisti_text(text):
         text = bez_diakritiky(text)
-
-        # sjednotíme pomlčky
-        text = text.replace("–", "-")
-        text = text.replace("—", "-")
-
-        # odstraníme nadbytečné mezery
-        text = " ".join(text.split())
-
-        return text.strip()
+        text = text.replace("–", "-").replace("—", "-")
+        return " ".join(text.split()).strip()
 
     def odpovida_obci(text, obec):
-
         text = cisti_text(text)
-
-        nazev = cisti_text(
-            obec["nazev"]
-        )
-
-        # ------------------------------------
-        # Zakázané typy organizací
-        # ------------------------------------
+        nazev = cisti_text(obec["nazev"])
 
         zakazane = (
             "kraj ",
@@ -278,16 +226,10 @@ def najdi_kandidaty(obce, desky):
             "nemocnice",
         )
 
-        for zakaz in zakazane:
+        if any(text.startswith(zakaz) for zakaz in zakazane):
+            return False
 
-            if text.startswith(zakaz):
-                return False
-
-        # ------------------------------------
-        # Přesné tvary názvu obce
-        # ------------------------------------
-
-        mozne_tvary = [
+        mozne_tvary = (
             f"obec {nazev}",
             f"mesto {nazev}",
             f"mestys {nazev}",
@@ -298,18 +240,10 @@ def najdi_kandidaty(obce, desky):
             f"magistrat mesta {nazev}",
             f"uredni deska {nazev}",
             nazev,
-        ]
+        )
 
-        # Přesná shoda
         if text in mozne_tvary:
             return True
-
-        # ------------------------------------
-        # Některé desky mají například:
-        #
-        # "Úřední deska - Lanškroun"
-        # "Úřední deska města Pardubice"
-        # ------------------------------------
 
         odstranovaci_prefixy = (
             "uredni deska - ",
@@ -322,72 +256,26 @@ def najdi_kandidaty(obce, desky):
         )
 
         for prefix in odstranovaci_prefixy:
-
             if text.startswith(prefix):
-
-                zbytek = text[
-                    len(prefix):
-                ].strip()
-
+                zbytek = text[len(prefix):].strip()
                 if zbytek == nazev:
                     return True
 
-        # ------------------------------------
-        # Poskytovatel
-        #
-        # "Obec Dlouhá Třebová"
-        # "Město Chrudim"
-        # ------------------------------------
-
-        if text.startswith("obec "):
-
-            zbytek = text[
-                len("obec "):
-            ].strip()
-
-            return zbytek == nazev
-
-        if text.startswith("mesto "):
-
-            zbytek = text[
-                len("mesto "):
-            ].strip()
-
-            return zbytek == nazev
-
-        if text.startswith("mestys "):
-
-            zbytek = text[
-                len("mestys "):
-            ].strip()
-
-            return zbytek == nazev
-
-        if text.startswith(
-            "statutarni mesto "
+        for prefix in (
+            "obec ",
+            "mesto ",
+            "mestys ",
+            "statutarni mesto ",
         ):
-
-            zbytek = text[
-                len("statutarni mesto "):
-            ].strip()
-
-            return zbytek == nazev
-
-        # ------------------------------------
-        # Jinak NE
-        # ------------------------------------
+            if text.startswith(prefix):
+                zbytek = text[len(prefix):].strip()
+                return zbytek == nazev
 
         return False
 
-    # ----------------------------------------
-    # Procházení úředních desek
-    # ----------------------------------------
-
     for deska in desky:
-
         title = (
-            (deska.get("title") or {})
-            .get("cs")
+            (deska.get("title") or {}).get("cs")
             or ""
         )
 
@@ -400,29 +288,14 @@ def najdi_kandidaty(obce, desky):
 
         nalezena_obec = None
 
-        # Nejdřív zkusíme poskytovatele
-        # (ten je pro identifikaci nejdůležitější).
-
         for obec in obce:
-
-            if odpovida_obci(
-                publisher,
-                obec
-            ):
+            if odpovida_obci(publisher, obec):
                 nalezena_obec = obec
                 break
 
-        # Pokud poskytovatel nestačí,
-        # zkusíme ještě název datasetu.
-
         if nalezena_obec is None:
-
             for obec in obce:
-
-                if odpovida_obci(
-                    title,
-                    obec
-                ):
+                if odpovida_obci(title, obec):
                     nalezena_obec = obec
                     break
 
@@ -432,177 +305,91 @@ def najdi_kandidaty(obce, desky):
         kandidati.append(
             {
                 "deska": deska,
-                "obce": [
-                    nalezena_obec
-                ],
+                "obce": [nalezena_obec],
             }
         )
 
     return kandidati
 
 
-def stahni_jsonld(
-    session,
-    deska
-):
-
-    for distribution in (
-        deska.get("distribution")
-        or []
-    ):
-
-        url = (
-            distribution.get("accessURL")
-            or ""
-        )
-
-        format_data = (
-            distribution.get("format")
-            or ""
-        )
+def stahni_jsonld(session, deska):
+    for distribution in deska.get("distribution") or []:
+        url = distribution.get("accessURL") or ""
+        format_data = distribution.get("format") or ""
 
         if not url:
             continue
 
         if (
-            "json" not in
-            format_data.lower()
-            and not url.lower().endswith(
-                (".json", ".jsonld")
-            )
+            "json" not in format_data.lower()
+            and not url.lower().endswith((".json", ".jsonld"))
         ):
             continue
 
-        # ----------------------------------------
-        # Normální pokus
-        # ----------------------------------------
-
         try:
-
-            response = session.get(
-                url,
-                timeout=30
-            )
-
+            response = session.get(url, timeout=30)
             response.raise_for_status()
 
             try:
                 return response.json()
-
             except ValueError:
-
-                print(
-                    "      Server vrátil neplatný JSON."
-                )
-
+                print("      Server vrátil neplatný JSON.")
                 print(
                     f"      Content-Type: "
                     f"{response.headers.get('Content-Type', '')}"
                 )
-
-                print(
-                    f"      HTTP: {response.status_code}"
-                )
-
-                # Pokračujeme na další distribuci,
-                # pokud nějaká existuje.
+                print(f"      HTTP: {response.status_code}")
                 continue
 
         except requests.exceptions.SSLError as error:
+            print("      SSL chyba.")
+            print("      Zkouším připojení bez ověření certifikátu...")
 
-            print(
-                "      SSL chyba."
-            )
-
-            print(
-                "      Zkouším připojení bez ověření certifikátu..."
-            )
-
-            # Některé obecní weby mají špatně nastavený
-            # SSL certifikát. Pro čtení veřejných dat
-            # zkusíme ještě druhý pokus.
             try:
-
                 response = session.get(
                     url,
                     timeout=30,
-                    verify=False
+                    verify=False,
                 )
-
                 response.raise_for_status()
 
                 try:
                     return response.json()
-
                 except ValueError:
-
-                    print(
-                        "      Ani druhý pokus nevrátil JSON."
-                    )
-
+                    print("      Ani druhý pokus nevrátil JSON.")
                     continue
 
             except Exception as druhy_error:
-
-                print(
-                    f"      Druhý pokus selhal: "
-                    f"{druhy_error}"
-                )
-
+                print(f"      Druhý pokus selhal: {druhy_error}")
                 continue
 
         except requests.exceptions.RequestException as error:
-
-            print(
-                f"      Chyba připojení: {error}"
-            )
-
+            print(f"      Chyba připojení: {error}")
             continue
 
         except Exception as error:
-
-            print(
-                f"      Neočekávaná chyba: {error}"
-            )
-
+            print(f"      Neočekávaná chyba: {error}")
             continue
 
     return None
 
 
 def ziskej_informace(data):
-
-    if not isinstance(
-        data,
-        dict
-    ):
+    if not isinstance(data, dict):
         return []
 
-    informace = (
-        data.get("informace")
-        or []
-    )
+    informace = data.get("informace") or []
 
-    if isinstance(
-        informace,
-        dict
-    ):
-        informace = [
-            informace
-        ]
+    if isinstance(informace, dict):
+        informace = [informace]
 
     return informace
 
 
 def ziskej_datum_vyveseni(item):
-    """
-    Pokusí se najít datum vyvěšení v datech informace.
-    """
-
     if not isinstance(item, dict):
         return None
 
-    # Nejčastější přímé názvy polí.
     klice = (
         "datumVyveseni",
         "datum_vyveseni",
@@ -613,55 +400,38 @@ def ziskej_datum_vyveseni(item):
     )
 
     for klic in klice:
-
         hodnota = item.get(klic)
-
         if hodnota:
             return hodnota
 
-    # Pokud je datum uvnitř vnořených objektů,
-    # projdeme strukturu rekurzivně.
     nalezene = []
 
     def projdi(obj):
-
         if isinstance(obj, dict):
-
             for klic, hodnota in obj.items():
+                klic_text = bez_diakritiky(str(klic))
 
-                klic_text = bez_diakritiky(
-                    str(klic)
-                )
-
-                if (
-                    "vyves" in klic_text
-                    or "zverej" in klic_text
-                ):
-
+                if "vyves" in klic_text or "zverej" in klic_text:
                     if hodnota:
                         nalezene.append(hodnota)
 
                 projdi(hodnota)
 
         elif isinstance(obj, list):
-
             for hodnota in obj:
                 projdi(hodnota)
 
     projdi(item)
 
-    if nalezene:
-        return nalezene[0]
-
-    return None
+    return nalezene[0] if nalezene else None
 
 
 def je_aktualni_datum(datum):
     """
-    Vrátí True pouze pro záznamy zveřejněné
-    v posledních MAX_STARI_DNI dnech.
+    True pouze pro datum v intervalu:
+    dnes - MAX_STARI_DNI až dnes.
 
-    Neznámé nebo chybné datum = False.
+    Datum je vždy počítáno dynamicky při každém spuštění.
     """
 
     if not datum:
@@ -672,93 +442,54 @@ def je_aktualni_datum(datum):
     if datum_text in ("?", "", "None", "null"):
         return False
 
-    # Najdeme datum YYYY-MM-DD kdekoliv v textu
     match = re.search(
         r"\b(20\d{2}-\d{2}-\d{2})\b",
-        datum_text
+        datum_text,
     )
 
     if not match:
         return False
 
     try:
-
         datum_obj = datetime.strptime(
             match.group(1),
-            "%Y-%m-%d"
+            "%Y-%m-%d",
         ).date()
-
     except ValueError:
         return False
 
     dnes = date.today()
-
-    hranice = dnes - timedelta(
-        days=MAX_STARI_DNI
-    )
+    hranice = dnes - timedelta(days=MAX_STARI_DNI)
 
     return hranice <= datum_obj <= dnes
 
 
-def text_informace(item):
-
-    casti = []
-
-    def projdi(obj):
-
-        if isinstance(obj, str):
-            casti.append(obj)
-
-        elif isinstance(obj, dict):
-
-            for value in obj.values():
-                projdi(value)
-
-        elif isinstance(obj, list):
-
-            for value in obj:
-                projdi(value)
-
-    projdi(item)
-
-    return bez_diakritiky(
-        " ".join(casti)
-    )
-
-
 def je_aktualni_nabidka_pozemku(item):
     """
-    Vrátí True pouze tehdy, když jde velmi pravděpodobně
-    o aktuální nabídku/prodej pozemku.
+    Vrátí True pro pravděpodobné aktuální nabídky/prodeje pozemků.
 
-    Nechceme:
-    - stavební rozhodnutí
-    - běžné veřejné vyhlášky
-    - stavební řízení
-    - pronájmy
-    - pacht
-    - výpůjčky
+    Zahrnuje:
+    - prodej
+    - výběrové řízení
+    - aukci / dražbu
+
+    Vylučuje:
+    - stavební a územní řízení
+    - veřejné vyhlášky
+    - nájem / pacht
+    - výpůjčku
     - darování
     """
 
     if not isinstance(item, dict):
         return False
 
-    # ----------------------------------------
-    # Název dokumentu
-    # ----------------------------------------
-
     nazev = (
-        (item.get("název") or {})
-        .get("cs")
+        (item.get("název") or {}).get("cs")
         or ""
     )
 
     text = bez_diakritiky(nazev)
-
-    # ----------------------------------------
-    # Musí se týkat pozemku
-    # ----------------------------------------
 
     pozemek = any(
         slovo in text
@@ -777,10 +508,6 @@ def je_aktualni_nabidka_pozemku(item):
     if not pozemek:
         return False
 
-    # ----------------------------------------
-    # Nechtěné typy dokumentů
-    # ----------------------------------------
-
     nechtene = (
         "rozhodnuti",
         "stavebni povoleni",
@@ -791,15 +518,8 @@ def je_aktualni_nabidka_pozemku(item):
         "verejna vyhlaska",
     )
 
-    if any(
-        slovo in text
-        for slovo in nechtene
-    ):
+    if any(slovo in text for slovo in nechtene):
         return False
-
-    # ----------------------------------------
-    # Nechceme nájem / pacht / výpůjčku / darování
-    # ----------------------------------------
 
     nechtene_obchody = (
         "pronajem",
@@ -814,15 +534,8 @@ def je_aktualni_nabidka_pozemku(item):
         "darovat",
     )
 
-    if any(
-        slovo in text
-        for slovo in nechtene_obchody
-    ):
+    if any(slovo in text for slovo in nechtene_obchody):
         return False
-
-    # ----------------------------------------
-    # Prodej
-    # ----------------------------------------
 
     prodej = any(
         slovo in text
@@ -834,24 +547,16 @@ def je_aktualni_nabidka_pozemku(item):
             "prodejem",
             "zamer prodeje",
             "zamer prodat",
-            "zamer prodeje pozemku",
-            "zamer prodat pozemek",
         )
     )
 
-    # ----------------------------------------
-    # Výběrové řízení
-    # ----------------------------------------
-
-    vyberove = (
-        "vyberove rizeni" in text
-        or "vyberoveho rizeni" in text
-        or "vyberove rizeni na pozemek" in text
+    vyberove = any(
+        slovo in text
+        for slovo in (
+            "vyberove rizeni",
+            "vyberoveho rizeni",
+        )
     )
-
-    # ----------------------------------------
-    # Aukce / dražba
-    # ----------------------------------------
 
     aukce = any(
         slovo in text
@@ -863,80 +568,35 @@ def je_aktualni_nabidka_pozemku(item):
         )
     )
 
-    # ----------------------------------------
-    # Musí být skutečný obchodní záměr
-    # ----------------------------------------
-
-    if prodej:
-        return True
-
-    if pozemek and vyberove:
-        return True
-
-    if pozemek and aukce:
-        return True
-
-    return False
+    return prodej or vyberove or aukce
 
 
 def hlavni():
-
-    print(
-        "======================================"
-    )
-    print(
-        " ÚŘEDNÍ DESKA HLÍDAČ"
-    )
-    print(
-        " PARDUBICKÝ KRAJ"
-    )
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print(" ÚŘEDNÍ DESKA HLÍDAČ")
+    print(" PARDUBICKÝ KRAJ")
+    print("======================================")
     print()
 
-    # ------------------------------------
-    # 1. Obce
-    # ------------------------------------
+    session = vytvor_session()
 
-    obce = nacti_obce()
-
-    # ------------------------------------
-    # 2. Metadata NKOD
-    # ------------------------------------
-
-    desky = nacti_uredni_desky()
-
-    # ------------------------------------
-    # 3. Levný filtr
-    # ------------------------------------
+    obce = nacti_obce(session)
+    desky = nacti_uredni_desky(session)
 
     print()
-    print(
-        "Hledám možné úřední desky "
-        "obcí Pardubického kraje..."
-    )
+    print("Hledám možné úřední desky obcí Pardubického kraje...")
 
-    kandidati = najdi_kandidaty(
-        obce,
-        desky
-    )
+    kandidati = najdi_kandidaty(obce, desky)
 
     print()
-    print(
-        f"Kandidátních úředních desek: "
-        f"{len(kandidati)}"
-    )
-
+    print(f"Kandidátních úředních desek: {len(kandidati)}")
     print()
 
     for kandidat in kandidati:
-
         deska = kandidat["deska"]
 
         title = (
-            (deska.get("title") or {})
-            .get("cs")
+            (deska.get("title") or {}).get("cs")
             or "Bez názvu"
         )
 
@@ -948,48 +608,22 @@ def hlavni():
         )
 
         obce_text = ", ".join(
-            obec["nazev"]
-            for obec in kandidat["obce"]
+            obec["nazev"] for obec in kandidat["obce"]
         )
 
-        print(
-            f"✓ {publisher}"
-        )
-
-        print(
-            f"  Dataset: {title}"
-        )
-
-        print(
-            f"  Pravděpodobná obec: "
-            f"{obce_text}"
-        )
-
-    # ------------------------------------
-    # 4. Stahování pouze kandidátů
-    # ------------------------------------
+        print(f"✓ {publisher}")
+        print(f"  Dataset: {title}")
+        print(f"  Pravděpodobná obec: {obce_text}")
 
     print()
-    print(
-        "======================================"
-    )
-    print(
-        " STAHUJI VYBRANÉ ÚŘEDNÍ DESKY"
-    )
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print(" STAHUJI VYBRANÉ ÚŘEDNÍ DESKY")
+    print("======================================")
     print()
-
-    session = requests.Session()
 
     nalezene = []
 
-    for cislo, kandidat in enumerate(
-        kandidati,
-        start=1
-    ):
-
+    for cislo, kandidat in enumerate(kandidati, start=1):
         deska = kandidat["deska"]
 
         publisher = (
@@ -999,78 +633,32 @@ def hlavni():
             or "Neznámý"
         )
 
-        print(
-            f"[{cislo}/{len(kandidati)}] "
-            f"{publisher}"
-        )
+        print(f"[{cislo}/{len(kandidati)}] {publisher}")
 
-        data = stahni_jsonld(
-            session,
-            deska
-        )
+        data = stahni_jsonld(session, deska)
 
         if data is None:
-
-            print(
-                "   ✗ nepodařilo se stáhnout"
-            )
-
+            print("   ✗ nepodařilo se stáhnout")
             continue
 
-        informace = ziskej_informace(
-            data
-        )
-
-        print(
-            f"   {len(informace)} informací"
-        )
+        informace = ziskej_informace(data)
+        print(f"   {len(informace)} informací")
 
         for item in informace:
-
-            # --------------------------------
-            # Datum vyvěšení
-            # --------------------------------
-
             datum = ziskej_datum_vyveseni(item)
-
-            # --------------------------------
-            # Pouze aktuální dokumenty
-            # --------------------------------
 
             if not je_aktualni_datum(datum):
                 continue
 
-            # --------------------------------
-            # Pouze nabídky pozemků
-            # --------------------------------
-
             if not je_aktualni_nabidka_pozemku(item):
                 continue
 
-            # --------------------------------
-            # Název
-            # --------------------------------
-
             nazev = (
-                (
-                    item.get("název")
-                    or {}
-                ).get("cs")
+                (item.get("název") or {}).get("cs")
                 or "Bez názvu"
             )
 
-            # --------------------------------
-            # URL
-            # --------------------------------
-
-            url = (
-                item.get("url")
-                or ""
-            )
-
-            # --------------------------------
-            # Uložení nalezené nabídky
-            # --------------------------------
+            url = item.get("url") or ""
 
             nalezene.append(
                 {
@@ -1085,25 +673,20 @@ def hlavni():
                 }
             )
 
-    # ------------------------------------
-    # 4b. Odstranění duplicit
-    # ------------------------------------
-
     unikatni = []
     videne = set()
 
     for item in nalezene:
+        klic = item["url"]
 
-        klic = (
-            item["url"]
-            or (
+        if not klic:
+            klic = (
                 item["obce"][0]
                 + "|"
                 + item["nazev"]
                 + "|"
                 + str(item["datum"])
             )
-        )
 
         if klic in videne:
             continue
@@ -1113,75 +696,36 @@ def hlavni():
 
     nalezene = unikatni
 
-    print()
-    print(
-        f"Aktuálních nabídek pozemků: "
-        f"{len(nalezene)}"
-    )
-
-    # ------------------------------------
-    # 5. Výsledky
-    # ------------------------------------
-
-    print()
-    print(
-        "======================================"
-    )
-    print(
-        " NALEZENÉ KANDIDÁTNÍ NABÍDKY"
-    )
-    print(
-        "======================================"
-    )
-    print()
-
-    print(
-        f"Celkem: {len(nalezene)}"
+    # Nejnovější nabídky zobrazíme první.
+    nalezene.sort(
+        key=lambda item: str(item["datum"]),
+        reverse=True,
     )
 
     print()
+    print(f"Aktuálních nabídek pozemků: {len(nalezene)}")
+    print()
+    print("======================================")
+    print(" NALEZENÉ KANDIDÁTNÍ NABÍDKY")
+    print("======================================")
+    print()
+    print(f"Celkem: {len(nalezene)}")
+    print()
 
-    for cislo, item in enumerate(
-        nalezene[:100],
-        start=1
-    ):
-
-        print(
-            f"{cislo}. {item['nazev']}"
-        )
-
-        print(
-            f"   Obec: "
-            f"{', '.join(item['obce'])}"
-        )
-
-        print(
-            f"   Poskytovatel: "
-            f"{item['publisher']}"
-        )
-
-        print(
-            f"   Vyvěšení: "
-            f"{item['datum']}"
-        )
+    for cislo, item in enumerate(nalezene[:100], start=1):
+        print(f"{cislo}. {item['nazev']}")
+        print(f"   Obec: {', '.join(item['obce'])}")
+        print(f"   Poskytovatel: {item['publisher']}")
+        print(f"   Vyvěšení: {item['datum']}")
 
         if item["url"]:
-            print(
-                f"   URL: "
-                f"{item['url']}"
-            )
+            print(f"   URL: {item['url']}")
 
         print()
 
-    print(
-        "======================================"
-    )
-    print(
-        " KONEC"
-    )
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print(" KONEC")
+    print("======================================")
 
 
 if __name__ == "__main__":
