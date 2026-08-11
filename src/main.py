@@ -18,10 +18,10 @@ UREDNI_DESKY_OFN = (
 )
 
 PARDUBICKY_OKRESY = {
-    "3601",
-    "3602",
-    "3603",
-    "3604",
+    "3603",  # Chrudim
+    "3606",  # Pardubice
+    "3609",  # Svitavy
+    "3611",  # Ústí nad Orlicí
 }
 
 
