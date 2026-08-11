@@ -77,10 +77,6 @@ def nacti_obce(session):
     print("Stahuji obce Pardubickeho kraje...")
     print()
 
-    # ---------------------------------------------------------
-    # 1. RÚIAN - seznam obcí
-    # ---------------------------------------------------------
-
     response = session.get(RUIAN_URL, timeout=60)
     response.raise_for_status()
 
@@ -138,110 +134,13 @@ def nacti_obce(session):
                 "kod": kod,
                 "nazev": nazev,
                 "normalizovany_nazev": bez_diakritiky(nazev),
+                "ico": "",
             }
         )
 
     print(f"Nalezeno obci: {len(obce)}")
 
-    # ---------------------------------------------------------
-    # 2. ČSÚ RES - doplnění IČO podle kódu ZÚJ
-    # ---------------------------------------------------------
-
-    print()
-    print("Stahuji IČO obcí z RES ČSÚ...")
-
-    RES_URL = (
-        "https://opendata.csu.gov.cz/"
-        "soubory/od/od_org03/res_data.csv"
-    )
-
-    response = session.get(
-        RES_URL,
-        timeout=120,
-    )
-    response.raise_for_status()
-
-    res_raw = response.content
-
-    res_text = None
-
-    for encoding in ("utf-8-sig", "utf-8", "cp1250", "latin-1"):
-        try:
-            res_text = res_raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            pass
-
-    if res_text is None:
-        raise RuntimeError(
-            "RES CSV se nepodarilo dekodovat."
-        )
-
-    res_reader = csv.DictReader(
-        io.StringIO(res_text),
-        delimiter=";"
-    )
-
-    # Kód obce -> IČO
-    ico_podle_zuj = {}
-
-    for row in res_reader:
-        ico = (row.get("ICO") or "").strip()
-        iczuj = (row.get("ICZUJ") or "").strip()
-        rosforma = (row.get("ROSFORMA") or "").strip()
-        datum_zaniku = (row.get("DDATZAN") or "").strip()
-
-        if not ico or not iczuj:
-            continue
-
-        # 801 = obec / obec nebo městská část hl. m. Prahy
-        if rosforma != "801":
-            continue
-
-        # Vynecháme zaniklé subjekty.
-        if datum_zaniku:
-            continue
-
-        # Pro naši obec chceme jeden jednoznačný záznam.
-        if iczuj not in ico_podle_zuj:
-            ico_podle_zuj[iczuj] = ico
-
-    doplneno_ico = 0
-    bez_ico = []
-
-    for obec in obce:
-        ico = ico_podle_zuj.get(obec["kod"])
-
-        if ico:
-            obec["ico"] = ico
-            doplneno_ico += 1
-        else:
-            obec["ico"] = ""
-            bez_ico.append(obec["nazev"])
-
-    print(
-        f"IČO doplneno u obci: "
-        f"{doplneno_ico} z {len(obce)}"
-    )
-
-    if bez_ico:
-        print(
-            f"Obci bez nalezeneho ICO: "
-            f"{len(bez_ico)}"
-        )
-
-        # Jen prvních 20, abychom nezahltíli log.
-        for nazev in bez_ico[:20]:
-            print(f"  - {nazev}")
-
-        if len(bez_ico) > 20:
-            print(
-                f"  ... a dalsich "
-                f"{len(bez_ico) - 20}"
-            )
-
     return obce
-
 
 def graphql_dotaz(session, ofn_uri):
     query = f"""
