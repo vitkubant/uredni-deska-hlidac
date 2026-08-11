@@ -12,8 +12,12 @@ from urllib3.util.retry import Retry
 
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
+
 RUIAN_URL = "https://services.cuzk.cz/sestavy/cis/UI_OBEC.zip"
-UREDNI_DESKY_OFN = "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+
+UREDNI_DESKY_OFN = (
+    "https://ofn.gov.cz/úřední-desky/2021-07-20/"
+)
 
 PARDUBICKY_OKRESY = {
     "3603",  # Chrudim
