@@ -219,33 +219,165 @@ def nacti_uredni_desky():
 
 def najdi_kandidaty(obce, desky):
     """
-    Najde úřední desky obcí Pardubického kraje.
+    Spolehlivější přiřazení úřední desky ke konkrétní obci.
 
-    Důležité:
-    Nehledáme pouze libovolné slovo uvnitř názvu.
-    Pokud existuje obec "Vysoká" a úřední deska
-    je "Vysoká nad Labem", musí se použít
-    pouze úplný název "Vysoká nad Labem".
+    Nepoužíváme substring typu:
+        "Moravany" in "Moravany u Brna"
+
+    ale snažíme se získat skutečný název
+    organizace a porovnat ho s celým názvem obce.
     """
 
     kandidati = []
 
-    # Seřadíme obce od nejdelšího názvu.
-    # Díky tomu dostane přednost například:
-    #
-    # Vysoká nad Labem
-    #
-    # před:
-    #
-    # Vysoká
-    #
-    obce_serazene = sorted(
-        obce,
-        key=lambda obec: len(
-            obec["normalizovany_nazev"]
-        ),
-        reverse=True,
-    )
+    # ----------------------------------------
+    # Pomocná funkce
+    # ----------------------------------------
+
+    def cisti_text(text):
+        text = bez_diakritiky(text)
+
+        # sjednotíme pomlčky
+        text = text.replace("–", "-")
+        text = text.replace("—", "-")
+
+        # odstraníme nadbytečné mezery
+        text = " ".join(text.split())
+
+        return text.strip()
+
+    def odpovida_obci(text, obec):
+
+        text = cisti_text(text)
+
+        nazev = cisti_text(
+            obec["nazev"]
+        )
+
+        # ------------------------------------
+        # Zakázané typy organizací
+        # ------------------------------------
+
+        zakazane = (
+            "kraj ",
+            "krajsky urad",
+            "krajsky ",
+            "ministerstvo",
+            "okresni soud",
+            "krajsky soud",
+            "statni zastupitelstvi",
+            "vojensky ujezd",
+            "urad prace",
+            "financni urad",
+            "katastralni urad",
+            "policie",
+            "nemocnice",
+        )
+
+        for zakaz in zakazane:
+
+            if text.startswith(zakaz):
+                return False
+
+        # ------------------------------------
+        # Přesné tvary názvu obce
+        # ------------------------------------
+
+        mozne_tvary = [
+            f"obec {nazev}",
+            f"mesto {nazev}",
+            f"mestys {nazev}",
+            f"statutarni mesto {nazev}",
+            f"obecni urad {nazev}",
+            f"mestsky urad {nazev}",
+            f"urad mesta {nazev}",
+            f"magistrat mesta {nazev}",
+            f"uredni deska {nazev}",
+            nazev,
+        ]
+
+        # Přesná shoda
+        if text in mozne_tvary:
+            return True
+
+        # ------------------------------------
+        # Některé desky mají například:
+        #
+        # "Úřední deska - Lanškroun"
+        # "Úřední deska města Pardubice"
+        # ------------------------------------
+
+        odstranovaci_prefixy = (
+            "uredni deska - ",
+            "uredni deska – ",
+            "uredni deska mesta ",
+            "uredni deska obce ",
+            "uredni deska mestyse ",
+            "uredni deska uradu ",
+            "uredni deska ",
+        )
+
+        for prefix in odstranovaci_prefixy:
+
+            if text.startswith(prefix):
+
+                zbytek = text[
+                    len(prefix):
+                ].strip()
+
+                if zbytek == nazev:
+                    return True
+
+        # ------------------------------------
+        # Poskytovatel
+        #
+        # "Obec Dlouhá Třebová"
+        # "Město Chrudim"
+        # ------------------------------------
+
+        if text.startswith("obec "):
+
+            zbytek = text[
+                len("obec "):
+            ].strip()
+
+            return zbytek == nazev
+
+        if text.startswith("mesto "):
+
+            zbytek = text[
+                len("mesto "):
+            ].strip()
+
+            return zbytek == nazev
+
+        if text.startswith("mestys "):
+
+            zbytek = text[
+                len("mestys "):
+            ].strip()
+
+            return zbytek == nazev
+
+        if text.startswith(
+            "statutarni mesto "
+        ):
+
+            zbytek = text[
+                len("statutarni mesto "):
+            ].strip()
+
+            return zbytek == nazev
+
+        # ------------------------------------
+        # Jinak NE
+        # ------------------------------------
+
+        return False
+
+    # ----------------------------------------
+    # Procházení úředních desek
+    # ----------------------------------------
 
     for deska in desky:
 
@@ -262,87 +394,45 @@ def najdi_kandidaty(obce, desky):
             or ""
         )
 
-        text = bez_diakritiky(
-            title + " " + publisher
-        )
-
         nalezena_obec = None
 
-        for obec in obce_serazene:
+        # Nejdřív zkusíme poskytovatele
+        # (ten je pro identifikaci nejdůležitější).
 
-            nazev = obec[
-                "normalizovany_nazev"
-            ]
+        for obec in obce:
 
-            vzor = (
-                r"(?<![a-z])"
-                + re.escape(nazev)
-                + r"(?![a-z])"
-            )
-
-            if not re.search(
-                vzor,
-                text
+            if odpovida_obci(
+                publisher,
+                obec
             ):
-                continue
+                nalezena_obec = obec
+                break
 
-            # Ochrana proti situaci:
-            #
-            # "Kraj Vysočina"
-            #
-            # kde se sice nachází název obce
-            # "Vysočina", ale poskytovatelem
-            # není obec.
-            #
-            # U kandidáta chceme především obecní
-            # nebo městský úřad.
+        # Pokud poskytovatel nestačí,
+        # zkusíme ještě název datasetu.
 
-            text_lower = text
+        if nalezena_obec is None:
 
-            obecne_prefixy = (
-                "obec ",
-                "město ",
-                "městys ",
-                "obecní úřad ",
-                "městský úřad ",
-                "úřad městyse ",
-                "magistrát města ",
-                "statutární město ",
-            )
+            for obec in obce:
 
-            je_obecni_poskytovatel = any(
-                prefix in text_lower
-                for prefix in obecne_prefixy
-            )
-
-            if not je_obecni_poskytovatel:
-
-                # Zkusíme ještě, zda je název obce
-                # přesně na konci názvu poskytovatele.
-                publisher_text = (
-                    bez_diakritiky(
-                        publisher
-                    )
-                )
-
-                if not publisher_text.endswith(
-                    nazev
+                if odpovida_obci(
+                    title,
+                    obec
                 ):
-                    continue
+                    nalezena_obec = obec
+                    break
 
-            nalezena_obec = obec
-            break
+        if nalezena_obec is None:
+            continue
 
-        if nalezena_obec:
-
-            kandidati.append(
-                {
-                    "deska": deska,
-                    "obce": [
-                        nalezena_obec
-                    ],
-                }
-            )
+        kandidati.append(
+            {
+                "deska": deska,
+                "obce": [
+                    nalezena_obec
+                ],
+            }
+        )
 
     return kandidati
 
