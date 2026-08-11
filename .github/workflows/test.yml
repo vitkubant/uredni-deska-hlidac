@@ -1,11 +1,13 @@
-name: Test hlídače
+name: Hlídač pozemků
 
 on:
   workflow_dispatch:
   push:
+  schedule:
+    - cron: "0 5 * * *"
 
 jobs:
-  test:
+  hlidac:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,6 +23,6 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Spuštění programu
+      - name: Spuštění hlídače
         run: |
           python src/main.py
