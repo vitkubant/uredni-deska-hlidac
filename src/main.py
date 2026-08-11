@@ -359,19 +359,23 @@ def najdi_kandidaty(obce, desky):
                 if zbytek == nazev:
                     return True
 
-        # 3. Bezpečná shoda celého názvu obce uvnitř názvu
-        # publishera/datasetu.
+        # 3. Shoda názvu obce uvnitř publishera/datasetu.
+        #
+        # U jednoslovných názvů NEPOVOLUJEME pouhé nalezení slova
+        # uvnitř delšího názvu.
         #
         # Např.:
-        # "Město Holice - úřední deska"
-        # "Elektronická úřední deska města Holice"
+        #   obec "Veselí"
+        #   publisher "Veselí nad Moravou"
         #
-        # Ale nepoužíváme obyčejné:
-        #     if nazev in text
+        # není shoda.
         #
-        # protože by mohlo dojít k chybnému přiřazení.
-        if obsahuje_celou_frazi(text, nazev):
-            return True
+        # U víceslovných názvů je shoda celého názvu bezpečnější.
+        pocet_slov = len(nazev.split())
+
+if pocet_slov >= 2:
+    if obsahuje_celou_frazi(text, nazev):
+        return True
 
         return False
 
