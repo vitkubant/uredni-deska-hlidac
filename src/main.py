@@ -231,6 +231,25 @@ def nacti_uredni_desky(session):
 
         for deska in data:
             iri = deska.get("iri") or ""
+
+            publisher = deska.get("publisher") or {}
+            publisher_iri = publisher.get("iri") or ""
+
+            # IČO je u NKOD publishera obvykle poslední
+            # část IRI organizace.
+            ico = ""
+
+            match = re.search(
+                r"/(\d{8})$",
+                publisher_iri
+            )
+
+            if match:
+                ico = match.group(1)
+
+            # Uložíme si ho přímo k desce.
+            deska["_publisher_ico"] = ico
+
             if iri:
                 vsechny[iri] = deska
 
