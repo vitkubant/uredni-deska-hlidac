@@ -134,46 +134,47 @@ def nacti_obce(session):
 
 
 def graphql_dotaz(session, ofn_uri):
-    query = """
-    query($ofn: String!) {
+    query = f"""
+    query {{
       datasets(
         limit: 1000
-        filters: {
-          conformsTo: $ofn
-        }
-      ) {
-        data {
+        filters: {{
+          conformsTo: "{ofn_uri}"
+        }}
+      ) {{
+        data {{
           iri
-          title {
+          title {{
             cs
-          }
-          publisher {
-            title {
+          }}
+          publisher {{
+            title {{
               cs
-            }
+            }}
             iri
-          }
-          distribution {
+          }}
+          distribution {{
             accessURL
             format
-          }
-        }
-        pagination {
+          }}
+        }}
+        pagination {{
           totalCount
-        }
-      }
-    }
+        }}
+      }}
+    }}
     """
 
     response = session.post(
         NKOD_GRAPHQL,
-        json={
-            "query": query,
-            "variables": {"ofn": ofn_uri},
-        },
+        json={"query": query},
         timeout=60,
     )
-    response.raise_for_status()
+
+    if not response.ok:
+        print(f"  NKOD HTTP chyba: {response.status_code}")
+        print(f"  Odpoved serveru: {response.text[:1000]}")
+        return None
 
     result = response.json()
 
