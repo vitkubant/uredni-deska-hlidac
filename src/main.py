@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import unicodedata
 import zipfile
 
@@ -8,22 +9,12 @@ import requests
 
 NKOD_GRAPHQL = "https://data.gov.cz/graphql"
 
-# Oficiální číselník obcí RÚIAN od ČÚZK
 RUIAN_URL = "https://services.cuzk.cz/sestavy/cis/UI_OBEC.zip"
 
 UREDNI_DESKY_OFN = (
     "https://ofn.gov.cz/úřední-desky/2021-07-20/"
 )
 
-# Okresy Pardubického kraje:
-#
-# Chrudim          3601
-# Pardubice        3602
-# Svitavy          3603
-# Ústí nad Orlicí  3604
-#
-# Používáme kódy okresů místo názvů,
-# takže nehrozí problém s diakritikou.
 PARDUBICKY_OKRESY = {
     "3601",
     "3602",
@@ -33,8 +24,6 @@ PARDUBICKY_OKRESY = {
 
 
 def bez_diakritiky(text):
-    """Odstraní diakritiku a převede text na malá písmena."""
-
     text = text or ""
 
     text = unicodedata.normalize(
@@ -42,20 +31,15 @@ def bez_diakritiky(text):
         text
     )
 
-    text = "".join(
+    return "".join(
         znak
         for znak in text
         if not unicodedata.combining(znak)
-    )
-
-    return text.lower().strip()
+    ).lower().strip()
 
 
 def nacti_obce():
-    """Stáhne všechny obce z RÚIAN a vybere Pardubický kraj."""
-
     print("Stahuji seznam obcí z RÚIAN...")
-    print(f"Zdroj: {RUIAN_URL}")
     print()
 
     response = requests.get(
@@ -65,49 +49,25 @@ def nacti_obce():
 
     response.raise_for_status()
 
-    print(
-        f"Staženo: "
-        f"{len(response.content):,} bytů"
-    )
-
-    # ZIP otevřeme přímo z paměti.
     with zipfile.ZipFile(
         io.BytesIO(response.content)
     ) as archive:
 
-        soubory = archive.namelist()
-
-        print("Obsah ZIP souboru:")
-        for soubor in soubory:
-            print(f"  {soubor}")
-
-        print()
-
-        # Najdeme CSV soubor.
         csv_soubory = [
             soubor
-            for soubor in soubory
+            for soubor in archive.namelist()
             if soubor.lower().endswith(".csv")
         ]
 
         if not csv_soubory:
             raise RuntimeError(
-                "V UI_OBEC.zip nebyl nalezen CSV soubor."
+                "V ZIP souboru nebyl nalezen CSV soubor."
             )
 
-        csv_soubor = csv_soubory[0]
-
-        print(
-            f"Používám soubor: {csv_soubor}"
-        )
-        print()
-
         raw_data = archive.read(
-            csv_soubor
+            csv_soubory[0]
         )
 
-    # ČÚZK může změnit kódování.
-    # Zkusíme UTF-8 a potom Windows-1250.
     text = None
 
     for encoding in [
@@ -120,22 +80,16 @@ def nacti_obce():
             text = raw_data.decode(
                 encoding
             )
-
-            print(
-                f"CSV načteno jako {encoding}."
-            )
-
             break
 
         except UnicodeDecodeError:
-            continue
+            pass
 
     if text is None:
         raise RuntimeError(
-            "Nepodařilo se dekódovat CSV."
+            "Nepodařilo se načíst CSV."
         )
 
-    # CSV ČÚZK používá středník.
     reader = csv.DictReader(
         io.StringIO(text),
         delimiter=";"
@@ -168,11 +122,9 @@ def nacti_obce():
         if not kod or not nazev:
             continue
 
-        # Pouze aktuálně platné obce.
         if plati_do:
             continue
 
-        # Pouze okresy Pardubického kraje.
         if okres not in PARDUBICKY_OKRESY:
             continue
 
@@ -190,7 +142,6 @@ def nacti_obce():
         )
     )
 
-    print()
     print(
         f"Obcí v Pardubickém kraji: "
         f"{len(obce)}"
@@ -200,8 +151,6 @@ def nacti_obce():
 
 
 def nacti_uredni_desky():
-    """Stáhne úřední desky z NKOD."""
-
     print()
     print(
         "Stahuji seznam úředních desek z NKOD..."
@@ -229,6 +178,11 @@ def nacti_uredni_desky():
 
             iri
           }}
+
+          distribution {{
+            accessURL
+            format
+          }}
         }}
 
         pagination {{
@@ -251,8 +205,19 @@ def nacti_uredni_desky():
     result = response.json()
 
     if "errors" in result:
+        print(
+            "GraphQL chyba:"
+        )
+        print(
+            json.dumps(
+                result["errors"],
+                indent=2,
+                ensure_ascii=False
+            )
+        )
+
         raise RuntimeError(
-            result["errors"]
+            "NKOD GraphQL vrátil chybu."
         )
 
     datasets = result["data"]["datasets"]
@@ -267,77 +232,105 @@ def nacti_uredni_desky():
     )
 
     print(
-        f"Staženo záznamů: "
+        f"Staženo metadat: "
         f"{len(data)}"
     )
 
     return data
 
 
-def najdi_shodu(obec, desky):
+def stahni_obsah_desky(deska):
     """
-    Pokusí se najít úřední desky dané obce.
-
-    Hledáme název obce v názvu poskytovatele
-    nebo názvu datové sady.
+    Stáhne JSON-LD konkrétní úřední desky.
     """
 
-    hledany_nazev = bez_diakritiky(
-        obec["nazev"]
+    distributions = (
+        deska.get("distribution")
+        or []
     )
 
-    vysledky = []
+    for distribution in distributions:
 
-    for deska in desky:
-
-        title = (
-            (deska.get("title") or {})
-            .get("cs")
+        url = (
+            distribution.get("accessURL")
             or ""
         )
 
-        publisher = (
-            (deska.get("publisher") or {})
-            .get("title", {})
-            .get("cs")
+        format_data = (
+            distribution.get("format")
             or ""
         )
 
-        title_norm = bez_diakritiky(
-            title
-        )
-
-        publisher_norm = bez_diakritiky(
-            publisher
-        )
-
-        # Preferujeme shodu v názvu poskytovatele.
-        if hledany_nazev in publisher_norm:
-
-            vysledky.append(
-                {
-                    "title": title,
-                    "publisher": publisher,
-                    "iri": deska["iri"],
-                    "typ_shody": "poskytovatel"
-                }
+        # Preferujeme JSON-LD.
+        if (
+            "json" not in
+            format_data.lower()
+            and not url.lower().endswith(
+                (".json", ".jsonld")
             )
-
+        ):
             continue
 
-        # Druhá možnost je název samotné datové sady.
-        if hledany_nazev in title_norm:
+        if not url:
+            continue
 
-            vysledky.append(
-                {
-                    "title": title,
-                    "publisher": publisher,
-                    "iri": deska["iri"],
-                    "typ_shody": "název datové sady"
-                }
+        try:
+
+            response = requests.get(
+                url,
+                timeout=30
             )
 
-    return vysledky
+            response.raise_for_status()
+
+            return (
+                url,
+                response.json()
+            )
+
+        except Exception as error:
+
+            print(
+                f"  Chyba při stahování: "
+                f"{error}"
+            )
+
+            return (
+                url,
+                None
+            )
+
+    return (
+        None,
+        None
+    )
+
+
+def ziskej_informace(data):
+    """
+    Vytáhne pole 'informace' z JSON-LD.
+    """
+
+    if not isinstance(
+        data,
+        dict
+    ):
+        return []
+
+    informace = (
+        data.get("informace")
+        or []
+    )
+
+    if isinstance(
+        informace,
+        dict
+    ):
+        informace = [
+            informace
+        ]
+
+    return informace
 
 
 def main():
@@ -349,198 +342,203 @@ def main():
         "  ÚŘEDNÍ DESKA HLÍDAČ"
     )
     print(
-        "  Pardubický kraj"
+        "  Test obsahu úředních desek"
     )
     print(
         "======================================"
     )
     print()
 
-    # ------------------------------------
-    # 1. Obce Pardubického kraje
-    # ------------------------------------
+    # ----------------------------------
+    # 1. Obce
+    # ----------------------------------
 
     obce = nacti_obce()
 
-    if not obce:
-        raise RuntimeError(
-            "Nenalezena žádná obec. "
-            "Zkontroluj strukturu RÚIAN CSV."
-        )
-
-    # ------------------------------------
-    # 2. Úřední desky z NKOD
-    # ------------------------------------
+    # ----------------------------------
+    # 2. Úřední desky
+    # ----------------------------------
 
     desky = nacti_uredni_desky()
 
-    # ------------------------------------
-    # 3. Porovnání
-    # ------------------------------------
-
     print()
     print(
         "======================================"
     )
     print(
-        "  POROVNÁNÍ"
+        "  TEST DISTRIBUCÍ"
     )
     print(
         "======================================"
     )
     print()
 
-    nalezene = 0
-    nenalezene = 0
+    pocet_s_url = 0
+    pocet_stazenych = 0
 
-    vysledky = []
+    # Zatím pouze prvních 10.
+    # Nechceme při testu zbytečně
+    # stahovat stovky souborů.
+    for cislo, deska in enumerate(
+        desky[:10],
+        start=1
+    ):
 
-    for obec in obce:
-
-        shody = najdi_shodu(
-            obec,
-            desky
+        title = (
+            (deska.get("title") or {})
+            .get("cs")
+            or "Bez názvu"
         )
 
-        if shody:
+        publisher = (
+            (deska.get("publisher") or {})
+            .get("title", {})
+            .get("cs")
+            or "Neznámý poskytovatel"
+        )
 
-            nalezene += 1
+        print(
+            f"{cislo}. {title}"
+        )
 
-            vysledky.append(
-                {
-                    "obec": obec,
-                    "shody": shody
-                }
+        print(
+            f"   Poskytovatel: {publisher}"
+        )
+
+        distributions = (
+            deska.get("distribution")
+            or []
+        )
+
+        print(
+            f"   Distribucí: "
+            f"{len(distributions)}"
+        )
+
+        for distribution in distributions:
+
+            url = (
+                distribution.get("accessURL")
+                or ""
             )
+
+            format_data = (
+                distribution.get("format")
+                or ""
+            )
+
+            if url:
+
+                pocet_s_url += 1
+
+                print(
+                    f"   URL: {url}"
+                )
+
+                print(
+                    f"   Formát: "
+                    f"{format_data}"
+                )
+
+        url, data = stahni_obsah_desky(
+            deska
+        )
+
+        if data is not None:
+
+            pocet_stazenych += 1
+
+            informace = ziskej_informace(
+                data
+            )
+
+            print(
+                f"   ✓ JSON-LD stažen"
+            )
+
+            print(
+                f"   Počet informací: "
+                f"{len(informace)}"
+            )
+
+            # Ukázka prvních tří dokumentů.
+            for informace_item in (
+                informace[:3]
+            ):
+
+                nazev = (
+                    (
+                        informace_item
+                        .get("název")
+                        or {}
+                    )
+                    .get("cs")
+                    or "Bez názvu"
+                )
+
+                vyveseni = (
+                    (
+                        informace_item
+                        .get("vyvěšení")
+                        or {}
+                    )
+                    .get("datum")
+                    or "?"
+                )
+
+                url_dokumentu = (
+                    informace_item.get("url")
+                    or ""
+                )
+
+                print(
+                    f"      - {vyveseni} | "
+                    f"{nazev}"
+                )
+
+                if url_dokumentu:
+                    print(
+                        f"        {url_dokumentu}"
+                    )
 
         else:
 
-            nenalezene += 1
-
-            vysledky.append(
-                {
-                    "obec": obec,
-                    "shody": []
-                }
-            )
-
-    # ------------------------------------
-    # 4. Výpis nalezených
-    # ------------------------------------
-
-    print(
-        "OBCE S NALEZENOU ÚŘEDNÍ DESKOU"
-    )
-    print(
-        "--------------------------------------"
-    )
-    print()
-
-    for vysledek in vysledky:
-
-        if not vysledek["shody"]:
-            continue
-
-        obec = vysledek["obec"]
-
-        print(
-            f"✓ {obec['nazev']}"
-        )
-
-        print(
-            f"  Kód obce: {obec['kod']}"
-        )
-
-        print(
-            f"  Okres: {obec['okres']}"
-        )
-
-        for shoda in vysledek["shody"]:
-
             print(
-                f"  Úřední deska: "
-                f"{shoda['title']}"
-            )
-
-            print(
-                f"  Poskytovatel: "
-                f"{shoda['publisher']}"
-            )
-
-            print(
-                f"  Typ shody: "
-                f"{shoda['typ_shody']}"
-            )
-
-            print(
-                f"  IRI: "
-                f"{shoda['iri']}"
+                "   ✗ JSON-LD se nepodařilo stáhnout"
             )
 
         print()
 
-    # ------------------------------------
-    # 5. Výpis nenalezených
-    # ------------------------------------
-
-    print()
-    print(
-        "OBCE BEZ NALEZENÉ ÚŘEDNÍ DESKY"
-    )
-    print(
-        "--------------------------------------"
-    )
-    print()
-
-    for vysledek in vysledky:
-
-        if vysledek["shody"]:
-            continue
-
-        obec = vysledek["obec"]
-
-        print(
-            f"✗ {obec['nazev']} "
-            f"(kód {obec['kod']})"
-        )
-
-    # ------------------------------------
-    # 6. Souhrn
-    # ------------------------------------
-
-    print()
     print(
         "======================================"
     )
     print(
-        "  VÝSLEDEK"
+        "  VÝSLEDEK TESTU"
     )
     print(
         "======================================"
     )
 
     print(
-        f"Obcí v Pardubickém kraji: "
-        f"{len(obce)}"
+        f"Úředních desek testováno: "
+        f"{min(10, len(desky))}"
     )
 
     print(
-        f"Nalezena úřední deska: "
-        f"{nalezene}"
+        f"Distribucí s URL: "
+        f"{pocet_s_url}"
     )
 
     print(
-        f"Bez nalezené desky: "
-        f"{nenalezene}"
+        f"Úředních desek staženo: "
+        f"{pocet_stazenych}"
     )
 
-    pokryti = (
-        nalezene / len(obce) * 100
-    )
+    print()
 
     print(
-        f"Pokrytí přes NKOD: "
-        f"{pokryti:.1f} %"
+        "Další krok bude hledání "
+        "nabídek pozemků."
     )
 
 
