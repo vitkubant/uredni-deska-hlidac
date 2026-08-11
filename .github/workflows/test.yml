@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
   schedule:
-    - cron: "0 5 * * *"
+    - cron: "0 7 * * *"
 
 jobs:
   hlidac:
@@ -24,5 +24,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Spuštění hlídače
+         env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
         run: |
           python src/main.py
