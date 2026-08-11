@@ -520,36 +520,42 @@ def ziskej_informace(data):
 
 def je_aktualni_datum(datum):
     """
-    Vrátí True, pokud je datum vyvěšení
+    Vrátí True pouze pro záznamy zveřejněné
     v posledních MAX_STARI_DNI dnech.
 
-    Očekáváme datum ve formátu:
-        2026-08-10
+    Neznámé nebo chybné datum = False.
     """
 
-    if not datum or datum == "?":
+    if not datum:
+        return False
+
+    datum_text = str(datum).strip()
+
+    if datum_text in ("?", "", "None", "null"):
+        return False
+
+    # Najdeme datum YYYY-MM-DD kdekoliv v textu
+    match = re.search(
+        r"\b(20\d{2}-\d{2}-\d{2})\b",
+        datum_text
+    )
+
+    if not match:
         return False
 
     try:
-        # JSON-LD může obsahovat i čas:
-        # 2026-08-10T12:34:56
-        datum_text = str(datum).strip()
-
-        datum_text = datum_text[:10]
-
         datum_obj = datetime.strptime(
-            datum_text,
+            match.group(1),
             "%Y-%m-%d"
         ).date()
 
-    except (ValueError, TypeError):
+    except ValueError:
         return False
 
     dnes = date.today()
 
-    hranice = (
-        dnes
-        - timedelta(days=MAX_STARI_DNI)
+    hranice = dnes - timedelta(
+        days=MAX_STARI_DNI
     )
 
     return hranice <= datum_obj <= dnes
@@ -580,31 +586,51 @@ def text_informace(item):
     )
 
 
-def je_podezrely_prodej(item):
+def je_aktualni_nabidka_pozemku(item):
     """
-    Rozpozná nabídky týkající se pozemků
-    a současně vyřadí zjevně nerelevantní dokumenty.
+    Vrátí True pouze tehdy, když jde velmi pravděpodobně
+    o aktuální nabídku/prodej pozemku.
+
+    Nechceme:
+    - stavební rozhodnutí
+    - běžné veřejné vyhlášky
+    - stavební řízení
+    - pronájmy
+    - pacht
+    - výpůjčky
+    - darování
     """
 
-    text = text_informace(item)
+    if not isinstance(item, dict):
+        return False
 
     # ----------------------------------------
-    # POZEMEK / PARCELA
+    # Název dokumentu
+    # ----------------------------------------
+
+    nazev = (
+        (item.get("název") or {})
+        .get("cs")
+        or ""
+    )
+
+    text = bez_diakritiky(nazev)
+
+    # ----------------------------------------
+    # Musí se týkat pozemku
     # ----------------------------------------
 
     pozemek = any(
-        x in text
-        for x in (
+        slovo in text
+        for slovo in (
             "pozemek",
             "pozemku",
             "pozemky",
-            "pozemcich",
             "parcela",
             "parcely",
             "parcelni",
-            "parcelní",
-            "parc. c",
             "p. c.",
+            "ppc",
         )
     )
 
@@ -612,58 +638,17 @@ def je_podezrely_prodej(item):
         return False
 
     # ----------------------------------------
-    # PRODEJ
-    # ----------------------------------------
-
-    prodej = any(
-        x in text
-        for x in (
-            "prodej",
-            "prodeje",
-            "prodeji",
-            "prodat",
-            "prodej pozemku",
-            "prodeji pozemku",
-            "zamer prodeje",
-            "zamer prodat",
-        )
-    )
-
-    # ----------------------------------------
-    # ZÁMĚR
-    # ----------------------------------------
-
-    zamer = (
-        "zamer" in text
-        or "záměr" in text
-    )
-
-    # ----------------------------------------
-    # VÝBĚROVÉ ŘÍZENÍ
-    # ----------------------------------------
-
-    vyberove_rizeni = (
-        "vyberove rizeni" in text
-        or "vyberoveho rizeni" in text
-        or "vyberove" in text
-    )
-
-    # ----------------------------------------
-    # DAROVÁNÍ / VÝPŮJČKA / NÁJEM
-    #
-    # Tyto věci zatím nechceme.
+    # Nechtěné typy dokumentů
     # ----------------------------------------
 
     nechtene = (
-        "darovani",
-        "darovat",
-        "vypujcka",
-        "vypujcit",
-        "pronajem",
-        "pronajmu",
-        "najmu",
-        "pacht",
-        "vyprosa",
+        "rozhodnuti",
+        "stavebni povoleni",
+        "uzemni rozhodnuti",
+        "uzemni rizeni",
+        "stavebni rizeni",
+        "opatreni obecne povahy",
+        "verejna vyhlaska",
     )
 
     if any(
@@ -673,16 +658,82 @@ def je_podezrely_prodej(item):
         return False
 
     # ----------------------------------------
-    # HLAVNÍ PODMÍNKY
+    # Nechceme nájem / pacht / výpůjčku / darování
     # ----------------------------------------
 
-    if pozemek and prodej:
+    nechtene_obchody = (
+        "pronajem",
+        "pronajmu",
+        "najem",
+        "najmu",
+        "pacht",
+        "vypujcka",
+        "vypujcit",
+        "vyprosa",
+        "darovani",
+        "darovat",
+    )
+
+    if any(
+        slovo in text
+        for slovo in nechtene_obchody
+    ):
+        return False
+
+    # ----------------------------------------
+    # Prodej
+    # ----------------------------------------
+
+    prodej = any(
+        slovo in text
+        for slovo in (
+            "prodej",
+            "prodeje",
+            "prodeji",
+            "prodat",
+            "prodejem",
+            "zamer prodeje",
+            "zamer prodat",
+            "zamer prodeje pozemku",
+            "zamer prodat pozemek",
+        )
+    )
+
+    # ----------------------------------------
+    # Výběrové řízení
+    # ----------------------------------------
+
+    vyberove = (
+        "vyberove rizeni" in text
+        or "vyberoveho rizeni" in text
+        or "vyberove rizeni na pozemek" in text
+    )
+
+    # ----------------------------------------
+    # Aukce / dražba
+    # ----------------------------------------
+
+    aukce = any(
+        slovo in text
+        for slovo in (
+            "aukce",
+            "aukcni",
+            "drazba",
+            "drazebni",
+        )
+    )
+
+    # ----------------------------------------
+    # Musí být skutečný obchodní záměr
+    # ----------------------------------------
+
+    if prodej:
         return True
 
-    if pozemek and zamer:
+    if pozemek and vyberove:
         return True
 
-    if pozemek and vyberove_rizeni:
+    if pozemek and aukce:
         return True
 
     return False
@@ -833,78 +884,48 @@ def hlavni():
             f"   {len(informace)} informací"
         )
 
-        for item in informace:
+       for item in informace:
 
-            # --------------------------------
-            # Datum vyvěšení
-            # --------------------------------
+    # --------------------------------
+    # Datum vyvěšení
+    # --------------------------------
 
-            datum = (
-                (
-                    item.get("vyvěšení")
-                    or {}
-                ).get("datum")
-                or "?"
-            )
+    datum = ziskej_datum_vyveseni(item)
 
-            # --------------------------------
-            # Pouze aktuální dokumenty
-            # --------------------------------
+    # --------------------------------
+    # Pouze aktuální dokumenty
+    # --------------------------------
 
-            if not je_aktualni_datum(
-                datum
-            ):
-                continue
+    if not je_aktualni_datum(datum):
+        continue
 
-            # --------------------------------
-            # Pouze nabídky pozemků
-            # --------------------------------
+    # --------------------------------
+    # Pouze nabídky pozemků
+    # --------------------------------
 
-            if not je_podezrely_prodej(
-                item
-            ):
-                continue
+    if not je_podezrely_prodej(item):
+        continue
 
-            # --------------------------------
-            # Název
-            # --------------------------------
+    # --------------------------------
+    # Název
+    # --------------------------------
 
-            nazev = (
-                (
-                    item.get("název")
-                    or {}
-                ).get("cs")
-                or "Bez názvu"
-            )
+    nazev = (
+        (
+            item.get("název")
+            or {}
+        ).get("cs")
+        or "Bez názvu"
+    )
 
-            # --------------------------------
-            # URL
-            # --------------------------------
+    # --------------------------------
+    # URL
+    # --------------------------------
 
-            url = (
-                item.get("url")
-                or ""
-            )
-
-            nalezene.append(
-                {
-                    "obce": [
-                        obec["nazev"]
-                        for obec
-                        in kandidat["obce"]
-                    ],
-                    "publisher":
-                        publisher,
-                    "nazev":
-                        nazev,
-                    "datum":
-                        datum,
-                    "url":
-                        url,
-                }
-            )
-
-        time.sleep(0.1)
+    url = (
+        item.get("url")
+        or ""
+    )
     # ------------------------------------
     # 4b. Odstranění duplicit
     # ------------------------------------
