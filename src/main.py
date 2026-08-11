@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import unicodedata
 import zipfile
 import time
@@ -24,10 +25,6 @@ PARDUBICKY_OKRESY = {
 }
 
 
-# ============================================================
-# POMOCNÉ FUNKCE
-# ============================================================
-
 def bez_diakritiky(text):
     text = text or ""
 
@@ -40,39 +37,11 @@ def bez_diakritiky(text):
         znak
         for znak in text
         if not unicodedata.combining(znak)
-    ).lower()
+    ).lower().strip()
 
-
-def text_z_objektu(objekt):
-    """
-    Rekurzivně vytáhne text ze struktury JSON-LD.
-    """
-    vysledek = []
-
-    if isinstance(objekt, str):
-        vysledek.append(objekt)
-
-    elif isinstance(objekt, dict):
-        for hodnota in objekt.values():
-            vysledek.extend(
-                text_z_objektu(hodnota)
-            )
-
-    elif isinstance(objekt, list):
-        for polozka in objekt:
-            vysledek.extend(
-                text_z_objektu(polozka)
-            )
-
-    return " ".join(vysledek)
-
-
-# ============================================================
-# RÚIAN
-# ============================================================
 
 def nacti_obce():
-    print("Stahuji seznam obcí z RÚIAN...")
+    print("Stahuji obce Pardubického kraje...")
     print()
 
     response = requests.get(
@@ -87,40 +56,35 @@ def nacti_obce():
     ) as archive:
 
         csv_soubory = [
-            soubor
-            for soubor in archive.namelist()
-            if soubor.lower().endswith(".csv")
+            x for x in archive.namelist()
+            if x.lower().endswith(".csv")
         ]
 
         if not csv_soubory:
             raise RuntimeError(
-                "V ZIP souboru nebyl nalezen CSV soubor."
+                "V RÚIAN ZIP nebyl nalezen CSV soubor."
             )
 
-        raw_data = archive.read(
+        raw = archive.read(
             csv_soubory[0]
         )
 
     text = None
 
-    for encoding in [
+    for encoding in (
         "utf-8-sig",
         "cp1250",
-        "latin-1"
-    ]:
-
+        "latin-1",
+    ):
         try:
-            text = raw_data.decode(
-                encoding
-            )
+            text = raw.decode(encoding)
             break
-
         except UnicodeDecodeError:
             pass
 
     if text is None:
         raise RuntimeError(
-            "Nepodařilo se načíst CSV."
+            "CSV se nepodařilo dekódovat."
         )
 
     reader = csv.DictReader(
@@ -165,26 +129,22 @@ def nacti_obce():
             {
                 "kod": kod,
                 "nazev": nazev,
-                "okres": okres
+                "normalizovany_nazev":
+                    bez_diakritiky(nazev),
             }
         )
 
     print(
-        f"Obcí v Pardubickém kraji: "
-        f"{len(obce)}"
+        f"Nalezeno obcí: {len(obce)}"
     )
 
     return obce
 
 
-# ============================================================
-# NKOD
-# ============================================================
-
 def nacti_uredni_desky():
     print()
     print(
-        "Stahuji seznam úředních desek z NKOD..."
+        "Stahuji metadata úředních desek z NKOD..."
     )
 
     query = f"""
@@ -206,7 +166,6 @@ def nacti_uredni_desky():
             title {{
               cs
             }}
-
             iri
           }}
 
@@ -250,33 +209,88 @@ def nacti_uredni_desky():
 
     datasets = result["data"]["datasets"]
 
-    total = datasets["pagination"]["totalCount"]
-
-    data = datasets["data"]
-
     print(
-        f"NKOD obsahuje "
-        f"{total} úředních desek."
+        f"NKOD úředních desek: "
+        f"{datasets['pagination']['totalCount']}"
     )
 
-    return data
+    return datasets["data"]
 
 
-# ============================================================
-# STAŽENÍ ÚŘEDNÍ DESKY
-# ============================================================
+def najdi_kandidaty(obce, desky):
+    """
+    První, levný filtr.
 
-def stahni_obsah_desky(
+    Nepřipojujeme se na žádný web.
+    Pouze porovnáme názvy obcí s metadaty NKOD.
+    """
+
+    kandidati = []
+
+    for deska in desky:
+
+        title = (
+            (deska.get("title") or {})
+            .get("cs")
+            or ""
+        )
+
+        publisher = (
+            (deska.get("publisher") or {})
+            .get("title", {})
+            .get("cs")
+            or ""
+        )
+
+        text = bez_diakritiky(
+            title + " " + publisher
+        )
+
+        shody = []
+
+        for obec in obce:
+
+            nazev = obec[
+                "normalizovany_nazev"
+            ]
+
+            # Název obce musí být samostatné
+            # slovo, ne pouze část jiného slova.
+            vzor = (
+                r"(?<![a-z])"
+                + re.escape(nazev)
+                + r"(?![a-z])"
+            )
+
+            if re.search(
+                vzor,
+                text
+            ):
+                shody.append(
+                    obec
+                )
+
+        if shody:
+
+            kandidati.append(
+                {
+                    "deska": deska,
+                    "obce": shody,
+                }
+            )
+
+    return kandidati
+
+
+def stahni_jsonld(
     session,
     deska
 ):
 
-    distributions = (
+    for distribution in (
         deska.get("distribution")
         or []
-    )
-
-    for distribution in distributions:
+    ):
 
         url = (
             distribution.get("accessURL")
@@ -291,7 +305,6 @@ def stahni_obsah_desky(
         if not url:
             continue
 
-        # JSON-LD / JSON
         if (
             "json" not in
             format_data.lower()
@@ -323,10 +336,6 @@ def stahni_obsah_desky(
     return None
 
 
-# ============================================================
-# INFORMACE Z JSON-LD
-# ============================================================
-
 def ziskej_informace(data):
 
     if not isinstance(
@@ -351,162 +360,179 @@ def ziskej_informace(data):
     return informace
 
 
-# ============================================================
-# HLEDÁNÍ PRODEJŮ POZEMKŮ
-# ============================================================
+def text_informace(item):
 
-def vyhodnot_informaci(informace):
+    casti = []
 
-    text = bez_diakritiky(
-        text_z_objektu(
-            informace
-        )
+    def projdi(obj):
+
+        if isinstance(obj, str):
+            casti.append(obj)
+
+        elif isinstance(obj, dict):
+
+            for value in obj.values():
+                projdi(value)
+
+        elif isinstance(obj, list):
+
+            for value in obj:
+                projdi(value)
+
+    projdi(item)
+
+    return bez_diakritiky(
+        " ".join(casti)
     )
 
-    # --------------------------------------------
-    # Hlavní výrazy
-    # --------------------------------------------
 
-    ma_pozemek = any(
-        slovo in text
-        for slovo in [
+def je_podezrely_prodej(item):
+
+    text = text_informace(item)
+
+    pozemek = any(
+        x in text
+        for x in (
             "pozemek",
             "pozemku",
-            "pozemkem",
-        ]
-    )
-
-    ma_parcelu = any(
-        slovo in text
-        for slovo in [
             "parcela",
             "parcelni",
             "parc. c",
             "p. c.",
-        ]
+        )
     )
 
-    ma_prodej = any(
-        slovo in text
-        for slovo in [
+    prodej = any(
+        x in text
+        for x in (
             "prodej",
             "prodeje",
             "prodeji",
             "prodat",
-        ]
+        )
     )
 
-    ma_zamer = any(
-        slovo in text
-        for slovo in [
-            "zamer prodeje",
-            "zamer na prodej",
-            "zamer",
-        ]
+    zamer = (
+        "zamer" in text
     )
 
-    ma_nemovitost = any(
-        slovo in text
-        for slovo in [
+    nemovitost = any(
+        x in text
+        for x in (
             "nemovitost",
             "nemovitosti",
-        ]
+        )
     )
 
-    ma_prev = any(
-        slovo in text
-        for slovo in [
-            "prevod",
-            "prevodu",
-            "prevodem",
-        ]
-    )
+    # Nejdůležitější kombinace:
+    if pozemek and prodej:
+        return True
 
-    # --------------------------------------------
-    # Bodování
-    # --------------------------------------------
-
-    skore = 0
-
-    if ma_pozemek:
-        skore += 3
-
-    if ma_parcelu:
-        skore += 3
-
-    if ma_prodej:
-        skore += 3
-
-    if ma_zamer:
-        skore += 2
-
-    if ma_nemovitost:
-        skore += 1
-
-    if ma_prev:
-        skore += 1
-
-    # --------------------------------------------
-    # Kandidát
-    # --------------------------------------------
-
-    # Silný kandidát:
-    # pozemek/parcela + prodej
-    if (
-        (ma_pozemek or ma_parcelu)
-        and ma_prodej
+    # Druhá užitečná kombinace:
+    if zamer and (
+        pozemek or nemovitost
     ):
-        return skore
+        return True
 
-    # Nebo:
-    # záměr + nemovitost
-    if (
-        ma_zamer
-        and ma_nemovitost
-    ):
-        return skore
-
-    return 0
+    return False
 
 
-# ============================================================
-# HLAVNÍ PROGRAM
-# ============================================================
-
-def main():
+def hlavni():
 
     print(
         "======================================"
     )
     print(
-        "      ÚŘEDNÍ DESKA HLÍDAČ"
+        " ÚŘEDNÍ DESKA HLÍDAČ"
     )
     print(
-        "      HLEDÁNÍ PRODEJŮ POZEMKŮ"
+        " PARDUBICKÝ KRAJ"
     )
     print(
         "======================================"
     )
     print()
 
-    # ----------------------------------------
+    # ------------------------------------
     # 1. Obce
-    # ----------------------------------------
+    # ------------------------------------
 
     obce = nacti_obce()
 
-    # ----------------------------------------
-    # 2. Úřední desky
-    # ----------------------------------------
+    # ------------------------------------
+    # 2. Metadata NKOD
+    # ------------------------------------
 
     desky = nacti_uredni_desky()
+
+    # ------------------------------------
+    # 3. Levný filtr
+    # ------------------------------------
+
+    print()
+    print(
+        "Hledám možné úřední desky "
+        "obcí Pardubického kraje..."
+    )
+
+    kandidati = najdi_kandidaty(
+        obce,
+        desky
+    )
+
+    print()
+    print(
+        f"Kandidátních úředních desek: "
+        f"{len(kandidati)}"
+    )
+
+    print()
+
+    for kandidat in kandidati:
+
+        deska = kandidat["deska"]
+
+        title = (
+            (deska.get("title") or {})
+            .get("cs")
+            or "Bez názvu"
+        )
+
+        publisher = (
+            (deska.get("publisher") or {})
+            .get("title", {})
+            .get("cs")
+            or "Neznámý"
+        )
+
+        obce_text = ", ".join(
+            obec["nazev"]
+            for obec in kandidat["obce"]
+        )
+
+        print(
+            f"✓ {publisher}"
+        )
+
+        print(
+            f"  Dataset: {title}"
+        )
+
+        print(
+            f"  Pravděpodobná obec: "
+            f"{obce_text}"
+        )
+
+    # ------------------------------------
+    # 4. Stahování pouze kandidátů
+    # ------------------------------------
 
     print()
     print(
         "======================================"
     )
     print(
-        "  PROHLEDÁVÁNÍ ÚŘEDNÍCH DESEK"
+        " STAHUJI VYBRANÉ ÚŘEDNÍ DESKY"
     )
     print(
         "======================================"
@@ -515,137 +541,106 @@ def main():
 
     session = requests.Session()
 
-    kandidati = []
+    nalezene = []
 
-    uspesne = 0
-    neuspesne = 0
-    celkem_informaci = 0
-
-    celkem = len(desky)
-
-    for cislo, deska in enumerate(
-        desky,
+    for cislo, kandidat in enumerate(
+        kandidati,
         start=1
     ):
 
-        title = (
-            (deska.get("title") or {})
-            .get("cs")
-            or "Bez názvu"
-        )
+        deska = kandidat["deska"]
 
-        publisher_data = (
-            deska.get("publisher")
-            or {}
-        )
-
-        publisher_title = (
-            (publisher_data.get("title") or {})
+        publisher = (
+            (deska.get("publisher") or {})
+            .get("title", {})
             .get("cs")
-            or "Neznámý poskytovatel"
+            or "Neznámý"
         )
 
         print(
-            f"[{cislo}/{celkem}] "
-            f"{publisher_title}"
+            f"[{cislo}/{len(kandidati)}] "
+            f"{publisher}"
         )
 
-        data = stahni_obsah_desky(
+        data = stahni_jsonld(
             session,
             deska
         )
 
         if data is None:
 
-            neuspesne += 1
-
             print(
-                "      ✗ nepodařilo se stáhnout"
+                "   ✗ nepodařilo se stáhnout"
             )
 
             continue
-
-        uspesne += 1
 
         informace = ziskej_informace(
             data
         )
 
-        celkem_informaci += len(
-            informace
-        )
-
         print(
-            f"      {len(informace)} informací"
+            f"   {len(informace)} informací"
         )
 
-        for informace_item in informace:
+        for item in informace:
 
-            skore = vyhodnot_informaci(
-                informace_item
-            )
-
-            if skore <= 0:
+            if not je_podezrely_prodej(
+                item
+            ):
                 continue
 
-            nazev_data = (
-                informace_item.get("název")
-                or {}
-            )
-
             nazev = (
-                nazev_data.get("cs")
-                or ""
-            )
-
-            datum_data = (
-                informace_item.get("vyvěšení")
-                or {}
+                (
+                    item.get("název")
+                    or {}
+                ).get("cs")
+                or "Bez názvu"
             )
 
             datum = (
-                datum_data.get("datum")
+                (
+                    item.get("vyvěšení")
+                    or {}
+                ).get("datum")
                 or "?"
             )
 
             url = (
-                informace_item.get("url")
+                item.get("url")
                 or ""
             )
 
-            kandidati.append(
+            nalezene.append(
                 {
-                    "skore": skore,
-                    "poskytovatel":
-                        publisher_title,
-                    "nazev": nazev,
-                    "datum": datum,
-                    "url": url
+                    "obce": [
+                        obec["nazev"]
+                        for obec
+                        in kandidat["obce"]
+                    ],
+                    "publisher":
+                        publisher,
+                    "nazev":
+                        nazev,
+                    "datum":
+                        datum,
+                    "url":
+                        url,
                 }
             )
 
-        # Malá pauza, ať zbytečně
-        # nezatěžujeme servery.
         time.sleep(0.1)
 
-    # ----------------------------------------
-    # Výsledky
-    # ----------------------------------------
-
-    kandidati.sort(
-        key=lambda x: (
-            x["datum"],
-            x["skore"]
-        ),
-        reverse=True
-    )
+    # ------------------------------------
+    # 5. Výsledky
+    # ------------------------------------
 
     print()
     print(
         "======================================"
     )
     print(
-        "  VÝSLEDKY"
+        " NALEZENÉ KANDIDÁTNÍ NABÍDKY"
     )
     print(
         "======================================"
@@ -653,83 +648,48 @@ def main():
     print()
 
     print(
-        f"Úředních desek: {celkem}"
-    )
-
-    print(
-        f"Úspěšně staženo: {uspesne}"
-    )
-
-    print(
-        f"Chyb při stažení: {neuspesne}"
-    )
-
-    print(
-        f"Celkem informací: "
-        f"{celkem_informaci}"
-    )
-
-    print(
-        f"Podezřelých nabídek: "
-        f"{len(kandidati)}"
+        f"Celkem: {len(nalezene)}"
     )
 
     print()
 
-    if not kandidati:
+    for cislo, item in enumerate(
+        nalezene[:100],
+        start=1
+    ):
 
         print(
-            "Nebyly nalezeny žádné kandidátní nabídky."
+            f"{cislo}. {item['nazev']}"
         )
 
-    else:
+        print(
+            f"   Obec: "
+            f"{', '.join(item['obce'])}"
+        )
 
         print(
-            "======================================"
+            f"   Poskytovatel: "
+            f"{item['publisher']}"
         )
+
         print(
-            "  KANDIDÁTI NA PRODEJ POZEMKU"
+            f"   Vyvěšení: "
+            f"{item['datum']}"
         )
-        print(
-            "======================================"
-        )
+
+        if item["url"]:
+            print(
+                f"   URL: "
+                f"{item['url']}"
+            )
+
         print()
 
-        # Zatím vypíšeme maximálně 50 výsledků.
-        for cislo, kandidat in enumerate(
-            kandidati[:50],
-            start=1
-        ):
-
-            print(
-                f"{cislo}. "
-                f"[skóre {kandidat['skore']}] "
-                f"{kandidat['poskytovatel']}"
-            )
-
-            print(
-                f"   Datum: "
-                f"{kandidat['datum']}"
-            )
-
-            print(
-                f"   Název: "
-                f"{kandidat['nazev']}"
-            )
-
-            if kandidat["url"]:
-                print(
-                    f"   URL: "
-                    f"{kandidat['url']}"
-                )
-
-            print()
-
     print(
         "======================================"
     )
     print(
-        "  KONEC TESTU"
+        " KONEC"
     )
     print(
         "======================================"
@@ -737,4 +697,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    hlavni()
