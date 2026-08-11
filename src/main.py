@@ -884,7 +884,7 @@ def hlavni():
             f"   {len(informace)} informací"
         )
 
-       for item in informace:
+for item in informace:
 
     # --------------------------------
     # Datum vyvěšení
@@ -903,7 +903,7 @@ def hlavni():
     # Pouze nabídky pozemků
     # --------------------------------
 
-    if not je_podezrely_prodej(item):
+    if not je_aktualni_nabidka_pozemku(item):
         continue
 
     # --------------------------------
