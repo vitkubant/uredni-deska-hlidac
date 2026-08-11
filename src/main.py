@@ -31,8 +31,8 @@ PARDUBICKY_OKRESY = {
 MAX_STARI_DNI = 30
 
 USER_AGENT = (
-    "UredniDeskaHlídac/1.0 "
-    "(monitoring veřejných úředních desek)"
+    "UredniDeskaHlidac/1.0 "
+    "(monitoring verejnych urednich desek)"
 )
 
 
